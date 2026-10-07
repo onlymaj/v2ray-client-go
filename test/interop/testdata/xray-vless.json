@@ -1,0 +1,19 @@
+{
+  "log": {"loglevel": "debug"},
+  "inbounds": [
+    {"listen": "127.0.0.1", "port": 9400, "protocol": "vless",
+     "settings": {"clients": [{"id": "f26364b7-5024-4ff5-ad5d-60c53ea3f45f", "flow": "xtls-rprx-vision"}], "decryption": "none"},
+     "streamSettings": {"network": "tcp", "security": "reality",
+       "realitySettings": {"dest": "127.0.0.1:9443", "serverNames": ["example.test"],
+         "privateKey": "SGOtWlJYVMauLDBx9pzeC6OFaW_nm2dGNZ7qcVoHHVc", "shortIds": ["abcd"]}}},
+    {"listen": "127.0.0.1", "port": 9401, "protocol": "vless",
+     "settings": {"clients": [{"id": "f26364b7-5024-4ff5-ad5d-60c53ea3f45f", "flow": "xtls-rprx-vision"}], "decryption": "none"},
+     "streamSettings": {"network": "tcp", "security": "tls",
+       "tlsSettings": {"certificates": [{"certificateFile": "cert.pem", "keyFile": "key.pem"}]}}},
+    {"listen": "127.0.0.1", "port": 9402, "protocol": "vless",
+     "settings": {"clients": [{"id": "f26364b7-5024-4ff5-ad5d-60c53ea3f45f"}], "decryption": "none"},
+     "streamSettings": {"network": "tcp", "security": "tls",
+       "tlsSettings": {"certificates": [{"certificateFile": "cert.pem", "keyFile": "key.pem"}]}}}
+  ],
+  "outbounds": [{"protocol": "freedom"}]
+}

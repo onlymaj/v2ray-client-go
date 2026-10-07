@@ -1,0 +1,126 @@
+//go:build vless && reality
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	gotls "crypto/tls"
+	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"os"
+	"time"
+
+	"github.com/onlymaj/v2ray-client-go/internal/outbound"
+	_ "github.com/onlymaj/v2ray-client-go/internal/outbound/vless"
+	"github.com/onlymaj/v2ray-client-go/internal/transport"
+	_ "github.com/onlymaj/v2ray-client-go/internal/transport/reality"
+	_ "github.com/onlymaj/v2ray-client-go/internal/transport/tls"
+)
+
+func listen(addr string, cfg *gotls.Config) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		panic(err)
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				if cfg != nil {
+					c = gotls.Server(c, cfg)
+				}
+				io.Copy(c, c)
+			}()
+		}
+	}()
+}
+
+func run(name, layerName, layerSettings string, port int, vlessSettings string, dest int, innerTLS bool) {
+	lf, _ := transport.Lookup(layerName)
+	l, err := lf([]byte(layerSettings))
+	if err != nil {
+		fmt.Println(name, "FAIL layer", err)
+		return
+	}
+	of, _ := outbound.Lookup("vless")
+	d, err := of([]byte(vlessSettings), func(ctx context.Context) (net.Conn, error) {
+		c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			return nil, err
+		}
+		return l.Wrap(ctx, c)
+	})
+	if err != nil {
+		fmt.Println(name, "FAIL dialer", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c, err := d.Dial(ctx, "tcp", outbound.Addr{IP: netip.MustParseAddr("127.0.0.1"), Port: uint16(dest)})
+	if err != nil {
+		fmt.Println(name, "FAIL dial", err)
+		return
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(20 * time.Second))
+	var rw io.ReadWriter = c
+	if innerTLS {
+		tc := gotls.Client(c, &gotls.Config{InsecureSkipVerify: true, ServerName: "inner.test"})
+		if err := tc.Handshake(); err != nil {
+			fmt.Println(name, "FAIL inner handshake", err)
+			return
+		}
+		rw = tc
+	}
+	data := make([]byte, 1<<20)
+	rand.Read(data)
+	go func() {
+		for i := 0; i < len(data); i += 3000 {
+			rw.Write(data[i:min(i+3000, len(data))])
+		}
+	}()
+	got := make([]byte, len(data))
+	if _, err := io.ReadFull(rw, got); err != nil {
+		fmt.Println(name, "FAIL read", err)
+		return
+	}
+	if !bytes.Equal(got, data) {
+		fmt.Println(name, "FAIL mismatch")
+		return
+	}
+	fmt.Println(name, "OK")
+}
+
+func main() {
+	cert, err := gotls.LoadX509KeyPair(os.Args[1], os.Args[2])
+	if err != nil {
+		panic(err)
+	}
+	listen("127.0.0.1:9443", &gotls.Config{Certificates: []gotls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}})
+	listen("127.0.0.1:9444", &gotls.Config{Certificates: []gotls.Certificate{cert}})
+	listen("127.0.0.1:9445", nil)
+	time.Sleep(200 * time.Millisecond)
+	id := `"id":"f26364b7-5024-4ff5-ad5d-60c53ea3f45f"`
+	vision := `{` + id + `,"flow":"xtls-rprx-vision"}`
+	plain := `{` + id + `}`
+	for _, fp := range []string{"chrome", "firefox", "safari"} {
+		rs := `{"serverName":"example.test","fingerprint":"` + fp + `","publicKey":"UOYtBkamZWQ0UFKlSeRltak2gvt1kpm3NYtmXe0Xnic","shortId":"abcd"}`
+		run("reality+vision+innerTLS "+fp, "reality", rs, 9400, vision, 9444, true)
+		run("reality+vision+plain "+fp, "reality", rs, 9400, vision, 9445, false)
+	}
+	ts := `{"serverName":"example.test","allowInsecure":true}`
+	run("tls+vision+innerTLS", "tls", ts, 9401, vision, 9444, true)
+	run("tls+vision+plain", "tls", ts, 9401, vision, 9445, false)
+	run("tls+noflow+plain", "tls", ts, 9402, plain, 9445, false)
+	run("tls+noflow+innerTLS", "tls", ts, 9402, plain, 9444, true)
+	bad := `{"serverName":"example.test","publicKey":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","shortId":"abcd"}`
+	run("reality wrong key (expect FAIL dial)", "reality", bad, 9400, vision, 9445, false)
+}
