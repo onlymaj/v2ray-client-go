@@ -233,6 +233,14 @@ func TestRedialAfterDeadConnection(t *testing.T) {
 	if calls.Load() != 2 {
 		t.Fatalf("dialRaw calls %d, want 2", calls.Load())
 	}
+	// Client.Close drops the shared connection; its streams fail.
+	if err := cl.Close(); err != nil || cl.cc != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatal("stream survived Client.Close")
+	}
+	cl.Close() // idempotent
 }
 
 func TestWrapAndErrors(t *testing.T) {

@@ -208,6 +208,20 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 	return c.open(c.cc, c.raw), nil
 }
 
+// Close closes the shared HTTP/2 connection (aborting its streams) so a
+// discarded Client stops sending keepalive pings. A later DialStream dials
+// again.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cc == nil {
+		return nil
+	}
+	err := c.cc.Close()
+	c.cc, c.raw = nil, nil
+	return err
+}
+
 // open starts the streaming call. RoundTrip runs in the background because
 // the server may send response headers only after the client's first
 // message (grpc-go sends headers lazily).
