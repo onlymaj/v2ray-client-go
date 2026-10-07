@@ -7,6 +7,8 @@ package netfilter
 import (
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 )
 
 // Method identifies how the redirect rule was installed.
@@ -18,9 +20,25 @@ const (
 )
 
 // Redirect describes the rule: every TCP connection arriving in PREROUTING is
-// redirected to Port on the receiving interface's primary address.
+// redirected to Port on the receiving interface's primary address, except
+// connections to ExcludeDst (the container's own addresses, so the UI, DNS,
+// SOCKS and HTTP ports stay reachable). Only IPv4 addresses are used.
 type Redirect struct {
-	Port uint16
+	Port       uint16
+	ExcludeDst []netip.Addr
+}
+
+// LocalAddrs returns the IPv4 addresses of all non-loopback interfaces, the
+// usual ExcludeDst value.
+func LocalAddrs() []netip.Addr {
+	var out []netip.Addr
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		if p, err := netip.ParsePrefix(a.String()); err == nil && p.Addr().Is4() && !p.Addr().IsLoopback() {
+			out = append(out, p.Addr())
+		}
+	}
+	return out
 }
 
 // Installed is returned by Install; call Remove to delete the rule again.

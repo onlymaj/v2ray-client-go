@@ -38,9 +38,9 @@ func main() {
 	switch *mode {
 	case "none":
 	case "auto":
-		inst, err = netfilter.Install(netfilter.Redirect{Port: uint16(*port)})
+		inst, err = netfilter.Install(netfilter.Redirect{Port: uint16(*port), ExcludeDst: netfilter.LocalAddrs()})
 	default:
-		inst, err = netfilter.InstallWith(netfilter.Method(*mode), netfilter.Redirect{Port: uint16(*port)})
+		inst, err = netfilter.InstallWith(netfilter.Method(*mode), netfilter.Redirect{Port: uint16(*port), ExcludeDst: netfilter.LocalAddrs()})
 	}
 	if err != nil {
 		log.Printf("RESULT redirect install FAILED: %v", err)

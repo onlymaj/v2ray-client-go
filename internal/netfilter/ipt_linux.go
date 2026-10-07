@@ -13,6 +13,7 @@ package netfilter
 import (
 	"encoding/binary"
 	"fmt"
+	"net/netip"
 	"syscall"
 	"unsafe"
 )
@@ -81,8 +82,8 @@ func installLegacy(r Redirect) (*Installed, error) {
 	}
 	oldEntries := binary.LittleEndian.Uint32(info[76:])
 
-	tbl, hooks, under := legacyNatTable(r.Port)
-	if err := legacyReplace(fd, tbl, hooks, under, 6, oldEntries); err != nil {
+	tbl, hooks, under, n := legacyNatTable(r.Port, r.ExcludeDst)
+	if err := legacyReplace(fd, tbl, hooks, under, n, oldEntries); err != nil {
 		return nil, err
 	}
 	return &Installed{Method: MethodLegacy, remove: func() error {
@@ -91,17 +92,33 @@ func installLegacy(r Redirect) (*Installed, error) {
 			return err
 		}
 		defer syscall.Close(fd)
-		tbl, hooks, under := legacyNatTable(0)
-		return legacyReplace(fd, tbl, hooks, under, 5, 6)
+		tbl, hooks, under, empty := legacyNatTable(0, nil)
+		return legacyReplace(fd, tbl, hooks, under, empty, n)
 	}}, nil
 }
 
-// legacyNatTable lays out the entries. With port 0 it produces the empty
-// table (policies + ERROR only).
-func legacyNatTable(port uint16) (tbl []byte, hooks, under [5]uint32) {
-	add := func(e []byte) uint32 { off := uint32(len(tbl)); tbl = append(tbl, e...); return off }
+// legacyNatTable lays out the entries and returns how many there are. With
+// port 0 it produces the empty table (policies + ERROR only). Each excluded
+// destination gets an ACCEPT entry ahead of the REDIRECT, because one
+// ipt_entry can only negate a single address.
+func legacyNatTable(port uint16, exclude []netip.Addr) (tbl []byte, hooks, under [5]uint32, n uint32) {
+	add := func(e []byte) uint32 { off := uint32(len(tbl)); tbl = append(tbl, e...); n++; return off }
 
 	if port != 0 {
+		first := true
+		for _, a := range exclude {
+			if !a.Is4() {
+				continue
+			}
+			e := iptEntry(syscall.IPPROTO_TCP, stdAccept())
+			ip := a.As4()
+			copy(e[4:8], ip[:])                        // ipt_ip.dst
+			copy(e[12:16], []byte{255, 255, 255, 255}) // ipt_ip.dmsk
+			off := add(e)
+			if first {
+				hooks[nfIPPreRouting], first = off, false
+			}
+		}
 		// nf_nat_ipv4_multi_range_compat{rangesize=1, range[0]{flags, min_ip,
 		// max_ip, min.tcp.port, max.tcp.port}}; ports are network byte order.
 		data := make([]byte, 20)
@@ -109,7 +126,10 @@ func legacyNatTable(port uint16) (tbl []byte, hooks, under [5]uint32) {
 		binary.LittleEndian.PutUint32(data[4:], nfNatRangeProtoSpecified)
 		binary.BigEndian.PutUint16(data[16:], port)
 		binary.BigEndian.PutUint16(data[18:], port)
-		hooks[nfIPPreRouting] = add(iptEntry(syscall.IPPROTO_TCP, iptTarget(sizeofRedirTgt, "REDIRECT", data)))
+		off := add(iptEntry(syscall.IPPROTO_TCP, iptTarget(sizeofRedirTgt, "REDIRECT", data)))
+		if first {
+			hooks[nfIPPreRouting] = off
+		}
 		under[nfIPPreRouting] = add(iptEntry(0, stdAccept()))
 	} else {
 		hooks[nfIPPreRouting] = add(iptEntry(0, stdAccept()))

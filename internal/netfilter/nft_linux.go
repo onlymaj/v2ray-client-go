@@ -4,7 +4,7 @@ package netfilter
 //
 //	nft add table ip v2rayclient
 //	nft add chain ip v2rayclient prerouting '{ type nat hook prerouting priority dstnat; }'
-//	nft add rule ip v2rayclient prerouting meta l4proto tcp redirect to :PORT
+//	nft add rule ip v2rayclient prerouting meta l4proto tcp ip daddr != OWN_ADDR ... redirect to :PORT
 //
 // Constants come from include/uapi/linux/netfilter/nf_tables.h and
 // nfnetlink.h. nf_tables encodes integer attributes big-endian.
@@ -52,14 +52,21 @@ const (
 	nftaMetaKey    = 2
 	nftMetaL4proto = 16
 
-	nftaCmpSreg  = 1
-	nftaCmpOp    = 2
-	nftaCmpData  = 3
-	nftCmpEq     = 0
-	nftaDataVal  = 1
-	nftaImmDreg  = 1
-	nftaImmData  = 2
-	nftaRedirMin = 1
+	nftaCmpSreg = 1
+	nftaCmpOp   = 2
+	nftaCmpData = 3
+	nftCmpEq    = 0
+	nftCmpNeq   = 1
+
+	nftaPayloadDreg   = 1
+	nftaPayloadBase   = 2
+	nftaPayloadOffset = 3
+	nftaPayloadLen    = 4
+	nftPayloadNetwork = 1
+	nftaDataVal       = 1
+	nftaImmDreg       = 1
+	nftaImmData       = 2
+	nftaRedirMin      = 1
 
 	nftReg1 = 1
 
@@ -170,6 +177,28 @@ func installNFT(r Redirect) (*Installed, error) {
 	// Start from a clean table; ignore "does not exist".
 	_ = removeNFT()
 
+	// meta l4proto tcp, then one "ip daddr != a" per excluded address
+	// (consecutive expressions are ANDed), then redirect.
+	exprs := []nlattr{
+		expr("meta", attrU32(nftaMetaDreg, nftReg1), attrU32(nftaMetaKey, nftMetaL4proto)),
+		expr("cmp", attrU32(nftaCmpSreg, nftReg1), attrU32(nftaCmpOp, nftCmpEq),
+			nest(nftaCmpData, attr(nftaDataVal, []byte{syscall.IPPROTO_TCP}))),
+	}
+	for _, a := range r.ExcludeDst {
+		if !a.Is4() {
+			continue
+		}
+		ip := a.As4()
+		exprs = append(exprs,
+			expr("payload", attrU32(nftaPayloadDreg, nftReg1), attrU32(nftaPayloadBase, nftPayloadNetwork),
+				attrU32(nftaPayloadOffset, 16), attrU32(nftaPayloadLen, 4)), // IPv4 header daddr
+			expr("cmp", attrU32(nftaCmpSreg, nftReg1), attrU32(nftaCmpOp, nftCmpNeq),
+				nest(nftaCmpData, attr(nftaDataVal, ip[:]))))
+	}
+	exprs = append(exprs,
+		expr("immediate", attrU32(nftaImmDreg, nftReg1), nest(nftaImmData, attr(nftaDataVal, port[:]))),
+		expr("redir", attrU32(nftaRedirMin, nftReg1)))
+
 	err := nftBatch(
 		func(seq uint32) []byte {
 			return nlmsg(nftType(nftMsgNewTable), create, seq, nfprotoIPv4, 0, attrStr(nftaTableName, nftTable))
@@ -187,14 +216,7 @@ func installNFT(r Redirect) (*Installed, error) {
 			return nlmsg(nftType(nftMsgNewRule), create|syscall.NLM_F_APPEND, seq, nfprotoIPv4, 0,
 				attrStr(nftaRuleTable, nftTable),
 				attrStr(nftaRuleChain, nftChain),
-				nest(nftaRuleExprs,
-					expr("meta", attrU32(nftaMetaDreg, nftReg1), attrU32(nftaMetaKey, nftMetaL4proto)),
-					expr("cmp", attrU32(nftaCmpSreg, nftReg1), attrU32(nftaCmpOp, nftCmpEq),
-						nest(nftaCmpData, attr(nftaDataVal, []byte{syscall.IPPROTO_TCP}))),
-					expr("immediate", attrU32(nftaImmDreg, nftReg1),
-						nest(nftaImmData, attr(nftaDataVal, port[:]))),
-					expr("redir", attrU32(nftaRedirMin, nftReg1)),
-				))
+				nest(nftaRuleExprs, exprs...))
 		},
 	)
 	if err != nil {
