@@ -41,6 +41,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2"
 
 	"github.com/onlymaj/v2ray-client-go/internal/transport"
@@ -101,6 +102,15 @@ func New(settings []byte) (transport.Layer, error) {
 			return nil, fmt.Errorf("grpc: settings: %w", err)
 		}
 	}
+	if s.Authority != "" && !validAuthority(s.Authority) {
+		return nil, fmt.Errorf("grpc: invalid authority %q", s.Authority)
+	}
+	if hasCtl(s.ServiceName) {
+		return nil, fmt.Errorf("grpc: invalid serviceName %q", s.ServiceName)
+	}
+	if !httpguts.ValidHeaderFieldValue(s.UserAgent) {
+		return nil, fmt.Errorf("grpc: invalid userAgent %q", s.UserAgent)
+	}
 	stream := tunStreamName(s.ServiceName)
 	if s.MultiMode {
 		stream = tunMultiStreamName(s.ServiceName)
@@ -127,6 +137,21 @@ func New(settings []byte) (transport.Layer, error) {
 		}
 	}
 	return c, nil
+}
+
+// validAuthority reports whether a is a plain host[:port] usable as the
+// :authority and as the host of the request URL.
+func validAuthority(a string) bool {
+	if !httpguts.ValidHostHeader(a) {
+		return false
+	}
+	u, err := url.Parse("https://" + a)
+	return err == nil && u.Host == a && u.User == nil
+}
+
+// hasCtl reports whether s contains an ASCII control character.
+func hasCtl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7F })
 }
 
 // serviceName mirrors Xray grpc/config.go getServiceName.
@@ -172,7 +197,11 @@ func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
-	s := c.open(cc, conn)
+	s, err := c.open(cc, conn)
+	if err != nil {
+		cc.Close()
+		return nil, err
+	}
 	s.onClose = func() { cc.Close() }
 	return s, nil
 }
@@ -205,7 +234,11 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		}
 		c.cc, c.raw = cc, raw
 	}
-	return c.open(c.cc, c.raw), nil
+	s, err := c.open(c.cc, c.raw)
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // Close closes the shared HTTP/2 connection (aborting its streams) so a
@@ -225,14 +258,18 @@ func (c *Client) Close() error {
 // open starts the streaming call. RoundTrip runs in the background because
 // the server may send response headers only after the client's first
 // message (grpc-go sends headers lazily).
-func (c *Client) open(cc *http2.ClientConn, raw net.Conn) *streamConn {
+func (c *Client) open(cc *http2.ClientConn, raw net.Conn) (*streamConn, error) {
 	authority := c.authority
 	if authority == "" {
 		authority = raw.RemoteAddr().String()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	pr, pw := io.Pipe()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+authority+c.path, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+authority+c.path, pr)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("grpc: %w", err)
+	}
 	req.Host = authority
 	req.Header = http.Header{
 		"Content-Type": {"application/grpc"},
@@ -247,7 +284,7 @@ func (c *Client) open(cc *http2.ClientConn, raw net.Conn) *streamConn {
 	}
 	go s.writeLoop(pw)
 	go s.readLoop(cc, req, pr)
-	return s
+	return s, nil
 }
 
 // readLoop performs the call and feeds decoded messages to Read. Reading

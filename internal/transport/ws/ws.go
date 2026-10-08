@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http/httpguts"
+
 	"github.com/onlymaj/v2ray-client-go/internal/transport"
 )
 
@@ -75,7 +77,13 @@ func New(settings []byte) (transport.Layer, error) {
 	if l.path == "" || l.path[0] != '/' {
 		l.path = "/" + l.path
 	}
+	if strings.ContainsFunc(l.path, func(r rune) bool { return r <= ' ' || r == 0x7F }) {
+		return nil, fmt.Errorf("ws: invalid path %q", s.Path)
+	}
 	for k, v := range s.Headers {
+		if !httpguts.ValidHeaderFieldName(k) || !httpguts.ValidHeaderFieldValue(v) {
+			return nil, fmt.Errorf("ws: invalid header %q: %q", k, v)
+		}
 		// Deprecated "host" in headers (Xray: only used when host is empty).
 		if strings.EqualFold(k, "host") {
 			if l.host == "" {
@@ -84,6 +92,9 @@ func New(settings []byte) (transport.Layer, error) {
 			continue
 		}
 		l.headers.Set(k, v)
+	}
+	if l.host != "" && !httpguts.ValidHostHeader(l.host) {
+		return nil, fmt.Errorf("ws: invalid host %q", l.host)
 	}
 	return l, nil
 }
@@ -134,7 +145,10 @@ func (l *layer) handshake(ctx context.Context, conn net.Conn, ed []byte) (*Conn,
 		return nil, fmt.Errorf("ws: handshake: %w", err)
 	}
 
-	br := bufio.NewReaderSize(conn, 4096)
+	// Bound the response header so a server cannot grow it without limit;
+	// the limit is lifted once the handshake is done.
+	hr := &handshakeReader{r: conn, n: maxHandshake}
+	br := bufio.NewReaderSize(hr, 4096)
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
 	if err != nil {
 		return nil, fmt.Errorf("ws: handshake: %w", err)
@@ -144,7 +158,34 @@ func (l *layer) handshake(ctx context.Context, conn net.Conn, ed []byte) (*Conn,
 		resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
 		return nil, fmt.Errorf("ws: handshake: bad response %q", resp.Status)
 	}
+	hr.n = -1
 	return &Conn{Conn: conn, br: br}, nil
+}
+
+// maxHandshake bounds the bytes read for the handshake response.
+const maxHandshake = 64 << 10
+
+var errHandshakeTooLarge = errors.New("ws: handshake response too large")
+
+// handshakeReader reads from r, failing after n bytes; n < 0 means no limit.
+type handshakeReader struct {
+	r io.Reader
+	n int64
+}
+
+func (h *handshakeReader) Read(p []byte) (int, error) {
+	if h.n < 0 {
+		return h.r.Read(p)
+	}
+	if h.n == 0 {
+		return 0, errHandshakeTooLarge
+	}
+	if int64(len(p)) > h.n {
+		p = p[:h.n]
+	}
+	n, err := h.r.Read(p)
+	h.n -= int64(n)
+	return n, err
 }
 
 // acceptKey computes Sec-WebSocket-Accept (RFC 6455 section 4.2.2 step 5.4).
@@ -327,6 +368,9 @@ func (c *Conn) Close() error {
 	return c.Conn.Close()
 }
 
+// earlyDataTimeout bounds the handshake deferred to the first Write.
+const earlyDataTimeout = 15 * time.Second
+
 // delayConn defers the handshake to the first Write so it can carry early
 // data (mirrors Xray websocket/dialer.go delayDialConn). The embedded raw
 // conn provides addresses and deadlines.
@@ -357,7 +401,9 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		if len(ed) > d.l.ed {
 			ed = nil
 		}
-		d.ws, d.err = d.l.handshake(context.Background(), d.Conn, ed)
+		ctx, cancel := context.WithTimeout(context.Background(), earlyDataTimeout)
+		defer cancel()
+		d.ws, d.err = d.l.handshake(ctx, d.Conn, ed)
 		wrote = d.err == nil && ed != nil
 		close(d.dialed)
 	})

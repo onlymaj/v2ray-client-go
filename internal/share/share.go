@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"golang.org/x/net/http/httpguts"
 )
 
 // Client is a protocol-neutral description of one proxy server.
@@ -105,7 +107,38 @@ func (c *Client) Validate() error {
 	default:
 		return fmt.Errorf("unsupported security %q", c.TLS)
 	}
+	// Values below end up in dial targets, HTTP request lines and headers.
+	for _, f := range []struct{ name, v string }{
+		{"address", c.Address}, {"sni", c.SNI}, {"host", c.Host}, {"authority", c.Authority}, {"path", c.Path},
+	} {
+		if hasCtlOrSpace(f.v) {
+			return fmt.Errorf("invalid %s %q", f.name, f.v)
+		}
+	}
+	for _, f := range []struct{ name, v string }{{"host", c.Host}, {"authority", c.Authority}} {
+		if f.v != "" && !httpguts.ValidHostHeader(f.v) {
+			return fmt.Errorf("invalid %s %q", f.name, f.v)
+		}
+	}
+	for _, f := range []struct{ name, v string }{{"serviceName", c.ServiceName}, {"spiderX", c.SpiderX}} {
+		if hasCtl(f.v) {
+			return fmt.Errorf("invalid %s %q", f.name, f.v)
+		}
+	}
+	for _, a := range c.ALPN {
+		if a == "" || len(a) > 255 || hasCtlOrSpace(a) || strings.Contains(a, ",") {
+			return fmt.Errorf("invalid alpn %q", a)
+		}
+	}
 	return nil
+}
+
+func hasCtl(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r < ' ' || r == 0x7F })
+}
+
+func hasCtlOrSpace(s string) bool {
+	return strings.ContainsFunc(s, func(r rune) bool { return r <= ' ' || r == 0x7F })
 }
 
 // ParseVLESS parses vless://uuid@host:port?params#name.
@@ -342,15 +375,27 @@ type Result struct {
 	Skipped int         `json:"skipped"` // lines with unsupported schemes (ss://, trojan://, ...)
 }
 
+// MaxLinks bounds the links ParseBulk and DecodeSubscription accept.
+const MaxLinks = 1000
+
+// maxErrorText bounds LineError.Text.
+const maxErrorText = 256
+
 // ParseBulk parses one link per line. Blank lines and comments (# or //)
 // are ignored, unsupported schemes are counted as skipped, and lines that
-// fail to parse are reported in Result.Errors.
+// fail to parse are reported in Result.Errors. Parsing stops with a
+// "too many links" error after MaxLinks links.
 func ParseBulk(text string) Result {
 	var r Result
+	links := 0
 	for i, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
+		}
+		if links++; links > MaxLinks {
+			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: fmt.Sprintf("too many links (max %d)", MaxLinks)})
+			break
 		}
 		c, err := Parse(line)
 		switch {
@@ -359,7 +404,7 @@ func ParseBulk(text string) Result {
 		case errors.Is(err, ErrUnsupportedScheme) || !strings.Contains(line, "://"):
 			r.Skipped++
 		default:
-			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: line, Err: err.Error()})
+			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: clip(err.Error())})
 		}
 	}
 	return r
@@ -391,6 +436,13 @@ func decodeBase64(s string) ([]byte, error) {
 		enc = enc.WithPadding(base64.NoPadding)
 	}
 	return enc.DecodeString(s)
+}
+
+func clip(s string) string {
+	if len(s) > maxErrorText {
+		return s[:maxErrorText] + "..."
+	}
+	return s
 }
 
 func normNetwork(n string) string {
