@@ -88,6 +88,7 @@ func run() error {
 	})
 
 	dnsSrv := dns.New(dns.Options{
+		Upstream: cfg.Settings.DNSUpstream,
 		Dial: func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, error) {
 			c, _, err := d.Dial(ctx, src, qname, dst)
 			return c, err
