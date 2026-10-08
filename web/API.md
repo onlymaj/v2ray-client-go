@@ -185,3 +185,11 @@ The server should send `retry: 3000` first and a comment line (`: ping`) every ~
 ## Static files
 
 The server serves `web/dist` at `/`, with `index.html` as the fallback for `/`. Every text asset has a pre-compressed `<file>.gz` beside it. Serve that file with `Content-Encoding: gzip` when the client accepts gzip. Assets under `/assets/` have hashed names and can be cached forever. The UI uses hash routing, so the server needs no rewrites for SPA routes.
+
+## Security responses
+
+- `403` on any `/api/*` request whose `Host` header is not an IP literal, `localhost`, or a name listed in the `UI_HOSTS` env var (DNS-rebinding guard), and on mutating requests whose `Origin` host differs from `Host`.
+- `415` on POST/PUT/DELETE without `Content-Type: application/json`.
+- `429` (with `Retry-After`) from `POST /api/login`: more than one login in flight per IP, more than 5 attempts per IP per minute, or more than 30 attempts per minute across all IPs.
+- `400` from `POST /api/import` with more than 1000 links; the config holds at most 1000 clients in total.
+- Changing `settings.routeros.url` or `user` without sending a new password clears the stored password.
