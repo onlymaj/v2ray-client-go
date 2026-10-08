@@ -331,8 +331,8 @@ const (
 	uiMaxConnsPerIP = 16
 )
 
-// capListener closes connections from a source that already holds
-// uiMaxConnsPerIP open UI connections.
+// capListener closes connections from a source (an IPv4 address or an IPv6
+// /64) that already holds uiMaxConnsPerIP open UI connections.
 type capListener struct {
 	net.Listener
 	mu    sync.Mutex
@@ -350,6 +350,10 @@ func (l *capListener) Accept() (net.Conn, error) {
 			return c, nil
 		}
 		ip := ap.Addr().Unmap()
+		if ip.Is6() {
+			// One host can hold many IPv6 addresses; count its /64.
+			ip = netip.PrefixFrom(ip, 64).Masked().Addr()
+		}
 		l.mu.Lock()
 		if l.perIP[ip] >= uiMaxConnsPerIP {
 			l.mu.Unlock()
