@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -136,7 +137,7 @@ func connectFrom(t *testing.T, src, addr string) (net.Conn, bool) {
 	return c, err == nil
 }
 
-// With the global cap full, a new source evicts the oldest conn of the
+// With the global cap full, a new source evicts the newest conn of the
 // heaviest source; the heaviest source itself is refused.
 func TestConnLimitGlobalEvicts(t *testing.T) {
 	setLimits(t, 3, 10)
@@ -165,13 +166,13 @@ func TestConnLimitGlobalEvicts(t *testing.T) {
 	if _, ok := connectFrom(t, "127.0.0.2", addr); !ok {
 		t.Fatal("new source refused instead of evicting")
 	}
-	heavy[0].SetReadDeadline(time.Now().Add(2 * time.Second))
-	if _, err := heavy[0].Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("oldest conn of the heaviest source not evicted: %v", err)
+	if !closed(heavy[2], 2*time.Second) {
+		t.Fatal("newest conn of the heaviest source not evicted")
 	}
-	heavy[1].SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-	if _, err := heavy[1].Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatalf("second conn closed too: %v", err)
+	for _, c := range heavy[:2] {
+		if closed(c, 100*time.Millisecond) {
+			t.Fatal("older conn of the heaviest source closed too")
+		}
 	}
 	limits.Lock()
 	n := limits.total
@@ -192,5 +193,57 @@ func TestSourceKeyIPv6Prefix(t *testing.T) {
 	v4 := netip.MustParseAddr("192.0.2.1")
 	if sourceKey(netip.AddrFrom16(v4.As16())) != v4 {
 		t.Fatal("mapped IPv4 not unmapped")
+	}
+}
+
+// closed reports whether c is closed by the peer within d.
+func closed(c net.Conn, d time.Duration) bool {
+	c.SetReadDeadline(time.Now().Add(d))
+	_, err := c.Read(make([]byte, 1))
+	return err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+}
+
+// Many attacker addresses can neither evict a source within its fair share
+// nor kill another host's long-lived conn.
+func TestConnLimitFairShare(t *testing.T) {
+	setLimits(t, 4, 10)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := holdHandler{make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	defer func() { close(h.release); cancel(); <-served }()
+	go func() { ServeHTTP(ctx, ln, h); close(served) }()
+	addr := ln.Addr().String()
+
+	long, ok := connectFrom(t, "127.0.0.1", addr) // a host's long-lived conn
+	if !ok {
+		t.Fatal("refused")
+	}
+	connectFrom(t, "127.0.0.1", addr)
+	for range 2 {
+		if _, ok := connectFrom(t, "127.0.0.2", addr); !ok {
+			t.Fatal("refused below the cap")
+		}
+	}
+	// Full (2+2). Each new attacker address may take a slot only from a
+	// source over its share, newest conn first.
+	for i := 3; i <= 6; i++ {
+		connectFrom(t, fmt.Sprintf("127.0.0.%d", i), addr)
+	}
+	if closed(long, 200*time.Millisecond) {
+		t.Fatal("long-lived conn of a host was evicted")
+	}
+	// Four sources hold one slot each: at their share, nobody is evicted.
+	if _, ok := connectFrom(t, "127.0.0.7", addr); ok {
+		t.Fatal("new source served although every source is within its share")
+	}
+	limits.Lock()
+	n := limits.total
+	limits.Unlock()
+	if n != 4 {
+		t.Fatalf("total = %d, want 4", n)
 	}
 }

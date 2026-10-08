@@ -26,6 +26,12 @@ const (
 	flagRA = 1 << 7
 
 	maxPointers = 64 // guards against pointer loops
+
+	// maxUDPSize caps the EDNS0 payload size honoured for UDP replies
+	// (the DNS flag day 2020 value). Larger answers are truncated so the
+	// client retries over TCP, whose source cannot be spoofed: this bounds
+	// how much a spoofed query can reflect.
+	maxUDPSize = 1232
 )
 
 var errMalformed = errors.New("dns: malformed message")
@@ -219,8 +225,8 @@ func parseRecords(msg []byte, h header, off int) ([]rr, error) {
 	return out, nil
 }
 
-// udpLimit returns the largest UDP response the client accepts: 512, or
-// the EDNS0 OPT payload size if the query carries one.
+// udpLimit returns the largest UDP response sent to the client: 512, or
+// the EDNS0 OPT payload size if the query carries one, at most maxUDPSize.
 func udpLimit(query []byte) int {
 	h, q, err := parseQuestion(query)
 	if err != nil {
@@ -232,7 +238,7 @@ func udpLimit(query []byte) int {
 	}
 	for _, r := range rrs {
 		if r.Section == 2 && r.Type == typeOPT {
-			return max(512, int(r.Class))
+			return min(max(512, int(r.Class)), maxUDPSize)
 		}
 	}
 	return 512

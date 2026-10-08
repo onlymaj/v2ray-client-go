@@ -31,12 +31,14 @@ const handshakeTimeout = 10 * time.Second
 // 512 conns stay within ~20 MB. Sources are counted per IPv4 address and
 // per IPv6 /64, so privacy addresses don't multiply the per-source cap.
 //
-// When the global cap is full, a new conn evicts the oldest conn of the
-// source holding the most slots, provided that source holds at least two
-// more than the new conn's source (so two busy sources don't keep evicting
-// each other); otherwise the new conn is closed at once. A few LAN hosts
-// can then never lock everyone else out: each source ends up with a fair
-// share of the slots.
+// When the global cap is full, a new conn from a source below its fair
+// share (maxConns / active sources, the new source included) evicts the
+// newest conn of the source holding the most slots, if that source holds
+// more than its fair share; otherwise the new conn is closed at once. A
+// few LAN hosts can then never lock everyone else out, and a host with
+// many addresses can neither evict a host within its share nor kill
+// anyone's long-lived conns: only the newest conns of an over-share source
+// go.
 var (
 	maxConns      = 512
 	maxConnsPerIP = 128
@@ -88,16 +90,21 @@ func acquire(c net.Conn, ip netip.Addr) *slot {
 		return nil
 	}
 	if limits.total >= maxConns {
+		active := len(limits.per)
+		if n == 0 {
+			active++
+		}
+		share := maxConns / active
 		var heavy *list.List
 		for k, l := range limits.per {
 			if k != key && (heavy == nil || l.Len() > heavy.Len()) {
 				heavy = l
 			}
 		}
-		if heavy == nil || heavy.Len() < n+2 {
+		if n >= share || heavy == nil || heavy.Len() <= share {
 			return nil
 		}
-		old := heavy.Front().Value.(*slot)
+		old := heavy.Back().Value.(*slot)
 		old.evicted = true
 		removeLocked(old)
 		victim = old.conn

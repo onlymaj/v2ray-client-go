@@ -193,3 +193,137 @@ func TestPerSourceTCPCap(t *testing.T) {
 		t.Fatalf("idle TCP client not dropped: %v after %v", err, time.Since(start))
 	}
 }
+
+// udpReplies sends n copies of q from src to the server at addr and
+// counts the replies.
+func udpReplies(t *testing.T, src, addr string, q []byte, n int) int {
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.DialUDP("udp", &net.UDPAddr{IP: net.ParseIP(src)}, raddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	for range n {
+		c.Write(q)
+	}
+	got := 0
+	buf := make([]byte, 65535)
+	for {
+		c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if _, err := c.Read(buf); err != nil {
+			return got
+		}
+		got++
+	}
+}
+
+// UDP replies, cache hits included, are rate limited per source; queries
+// over the rate get no reply. SourceLimit raises the rate for a source.
+func TestUDPRateLimit(t *testing.T) {
+	up := newFakeUpstream(t)
+	router := netip.MustParseAddr("127.0.0.3")
+	s := New(Options{
+		Upstream: up.ln.Addr().String(), Dial: directDial(&dialRecord{}),
+		RatePerSource: 2, // burst 5
+		SourceLimit: func(src netip.Addr) (int, int) {
+			if src == router {
+				return 0, 1000
+			}
+			return 0, 0
+		},
+	})
+	addr := startServer(t, s)
+	q := buildQuery(1, "a.example", typeA, 0)
+	if n := udpReplies(t, "127.0.0.1", addr, q, 1); n != 1 {
+		t.Fatalf("first query: %d replies", n)
+	}
+	if n := udpReplies(t, "127.0.0.1", addr, q, 20); n > 4 {
+		t.Fatalf("%d cached replies over the rate, want <= 4", n)
+	}
+	if n := up.queries.Load(); n != 1 {
+		t.Fatalf("upstream queries %d, want 1 (the rest were cache hits)", n)
+	}
+	if n := udpReplies(t, "127.0.0.2", addr, q, 1); n != 1 {
+		t.Fatal("other source limited")
+	}
+	if n := udpReplies(t, router.String(), addr, q, 20); n != 20 {
+		t.Fatalf("SourceLimit source got %d of 20 replies", n)
+	}
+}
+
+func TestRateLimiterRefillAndBound(t *testing.T) {
+	var r rateLimiter
+	r.b = map[netip.Addr]*bucket{}
+	now := time.Unix(1000, 0)
+	a := netip.MustParseAddr("10.0.0.1")
+	for i := range 2 { // rate 1: burst 2
+		if !r.allow(a, 1, now) {
+			t.Fatalf("query %d within the burst refused", i)
+		}
+	}
+	if r.allow(a, 1, now) {
+		t.Fatal("query over the burst allowed")
+	}
+	if !r.allow(a, 1, now.Add(time.Second)) {
+		t.Fatal("bucket not refilled")
+	}
+	// IPv6 sources share a bucket per /64.
+	b6, c6 := netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("2001:db8::2")
+	r.allow(b6, 1, now)
+	r.allow(c6, 1, now)
+	if r.allow(b6, 1, now) {
+		t.Fatal("IPv6 /64 not shared")
+	}
+
+	// A flood of new sources keeps the map bounded.
+	for i := range 3 * maxRateSources {
+		ip := netip.AddrFrom4([4]byte{10, 1, byte(i >> 8), byte(i)})
+		r.allow(ip, 20, now)
+	}
+	if len(r.b) > maxRateSources {
+		t.Fatalf("limiter holds %d sources, max %d", len(r.b), maxRateSources)
+	}
+	// Idle buckets are swept first.
+	later := now.Add(rateIdle + time.Second)
+	r.allow(netip.MustParseAddr("10.2.0.1"), 20, later)
+	if len(r.b) != 1 {
+		t.Fatalf("idle buckets not swept: %d left", len(r.b))
+	}
+}
+
+// SourceLimit sets the per-source in-flight cap for upstream queries and
+// TCP conns.
+func TestSourceLimitInFlight(t *testing.T) {
+	router := netip.MustParseAddr("192.168.88.1")
+	s := New(Options{
+		MaxPerSource: 2,
+		SourceLimit: func(src netip.Addr) (int, int) {
+			if src == router {
+				return 5, 0
+			}
+			return 0, 0
+		},
+	})
+	other := netip.MustParseAddr("192.168.88.2")
+	for _, p := range []*perSource{&s.queries, &s.tcpConns} {
+		for i := range 5 {
+			if !p.acquire(router) {
+				t.Fatalf("router slot %d refused", i)
+			}
+		}
+		if p.acquire(router) {
+			t.Fatal("router over its limit")
+		}
+		for range 2 {
+			if !p.acquire(other) {
+				t.Fatal("default slot refused")
+			}
+		}
+		if p.acquire(other) {
+			t.Fatal("other source over the default limit")
+		}
+	}
+}

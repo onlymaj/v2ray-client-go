@@ -20,7 +20,11 @@
 // Each source (IPv4 address or IPv6 /64) may have at most MaxPerSource
 // upstream queries and MaxPerSource TCP connections open at once; a query
 // over the limit is answered SERVFAIL, a connection over it is closed. TCP
-// clients must send each query within TCPIdleTimeout.
+// clients must send each query within TCPIdleTimeout. UDP queries (cache
+// hits included) are rate limited per source to RatePerSource per second,
+// with bursts of 2.5 times that; queries over the rate get no reply, so a
+// spoofed source can't turn the server into a reflector. SourceLimit can
+// raise both limits for chosen sources.
 package dns
 
 import (
@@ -58,11 +62,19 @@ type Options struct {
 
 	MaxInFlight    int           // concurrent upstream queries; default 64
 	MaxPerSource   int           // per-source upstream queries and TCP conns; default 16
+	RatePerSource  int           // per-source UDP queries per second; default 20
 	TCPIdleTimeout time.Duration // client TCP read limit per query; default 3s
 	Timeout        time.Duration // per-query upstream timeout; default 5s
 	IdleTimeout    time.Duration // pooled connection lifetime; default 10s
 	CacheSize      int           // entries; default 1024
-	Logf           func(format string, args ...any)
+
+	// SourceLimit, if set, returns the limits for queries from src instead
+	// of MaxPerSource and RatePerSource (e.g. higher ones for a router that
+	// forwards every LAN query). A value <= 0 means the default. It is
+	// called for every query and must be fast.
+	SourceLimit func(src netip.Addr) (maxInFlight, ratePerSec int)
+
+	Logf func(format string, args ...any)
 }
 
 type Server struct {
@@ -72,6 +84,7 @@ type Server struct {
 
 	queries  perSource // upstream queries in flight
 	tcpConns perSource // open client TCP conns
+	udpRate  rateLimiter
 
 	mu       sync.Mutex
 	upstream outbound.Addr
@@ -97,6 +110,9 @@ func New(opts Options) *Server {
 	if opts.MaxPerSource <= 0 {
 		opts.MaxPerSource = 16
 	}
+	if opts.RatePerSource <= 0 {
+		opts.RatePerSource = 20
+	}
 	if opts.TCPIdleTimeout <= 0 {
 		opts.TCPIdleTimeout = 3 * time.Second
 	}
@@ -112,11 +128,31 @@ func New(opts Options) *Server {
 		sem:   make(chan struct{}, opts.MaxInFlight),
 		idle:  map[string]idleConn{},
 
-		queries:  perSource{max: opts.MaxPerSource, n: map[netip.Addr]int{}},
-		tcpConns: perSource{max: opts.MaxPerSource, n: map[netip.Addr]int{}},
+		udpRate: rateLimiter{b: map[netip.Addr]*bucket{}},
 	}
+	s.queries = perSource{max: s.maxInFlight, n: map[netip.Addr]int{}}
+	s.tcpConns = perSource{max: s.maxInFlight, n: map[netip.Addr]int{}}
 	s.SetUpstream(opts.Upstream)
 	return s
+}
+
+// limits returns the in-flight cap and UDP rate for src.
+func (s *Server) limits(src netip.Addr) (maxInFlight, ratePerSec int) {
+	if s.opts.SourceLimit != nil {
+		maxInFlight, ratePerSec = s.opts.SourceLimit(src)
+	}
+	if maxInFlight <= 0 {
+		maxInFlight = s.opts.MaxPerSource
+	}
+	if ratePerSec <= 0 {
+		ratePerSec = s.opts.RatePerSource
+	}
+	return maxInFlight, ratePerSec
+}
+
+func (s *Server) maxInFlight(src netip.Addr) int {
+	n, _ := s.limits(src)
+	return n
 }
 
 // SetUpstream changes the upstream resolver and drops pooled connections.
@@ -223,6 +259,10 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 		if n < headerLen {
 			continue
 		}
+		src := srcOf(from)
+		if _, rate := s.limits(src); !s.udpRate.allow(src, rate, time.Now()) {
+			continue // over the rate: no reply, so nothing to reflect
+		}
 		select {
 		case handlers <- struct{}{}:
 		default:
@@ -231,7 +271,7 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 		query := append([]byte(nil), buf[:n]...)
 		go func() {
 			defer func() { <-handlers }()
-			resp := s.handle(ctx, srcOf(from), query)
+			resp := s.handle(ctx, src, query)
 			if resp == nil {
 				return
 			}
@@ -541,10 +581,10 @@ func typeString(t uint16) string {
 }
 
 // perSource counts something per source (IPv4 address or IPv6 /64) up to
-// max.
+// max(src).
 type perSource struct {
 	mu  sync.Mutex
-	max int
+	max func(netip.Addr) int
 	n   map[netip.Addr]int
 }
 
@@ -558,10 +598,10 @@ func sourceKey(ip netip.Addr) netip.Addr {
 }
 
 func (p *perSource) acquire(ip netip.Addr) bool {
-	k := sourceKey(ip)
+	k, limit := sourceKey(ip), p.max(ip)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.n[k] >= p.max {
+	if p.n[k] >= limit {
 		return false
 	}
 	p.n[k]++
@@ -574,5 +614,70 @@ func (p *perSource) release(ip netip.Addr) {
 	defer p.mu.Unlock()
 	if p.n[k]--; p.n[k] <= 0 {
 		delete(p.n, k)
+	}
+}
+
+// maxRateSources bounds the rate limiter's map. A bucket idle for
+// rateIdle is full again (bursts last at most 2.5 s), so dropping it loses
+// nothing.
+const (
+	maxRateSources = 4096
+	rateIdle       = 5 * time.Second
+)
+
+// rateLimiter is a token bucket per source (IPv4 address or IPv6 /64).
+type rateLimiter struct {
+	mu        sync.Mutex
+	b         map[netip.Addr]*bucket
+	lastSweep time.Time
+}
+
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+// allow takes a token from ip's bucket, which refills at rate per second
+// up to a burst of 2.5*rate.
+func (r *rateLimiter) allow(ip netip.Addr, rate int, now time.Time) bool {
+	k := sourceKey(ip)
+	burst := float64(max(rate*5/2, 1))
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.b[k]
+	if b == nil {
+		if len(r.b) >= maxRateSources {
+			r.evictLocked(now)
+		}
+		b = &bucket{tokens: burst}
+		r.b[k] = b
+	} else {
+		b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*float64(rate))
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// evictLocked makes room for one bucket: idle buckets go first (swept at
+// most once a second, so a flood of new sources costs O(1) per query),
+// else an arbitrary one, which only resets that source to a full burst.
+func (r *rateLimiter) evictLocked(now time.Time) {
+	if now.Sub(r.lastSweep) >= time.Second {
+		r.lastSweep = now
+		for k, b := range r.b {
+			if now.Sub(b.last) >= rateIdle {
+				delete(r.b, k)
+			}
+		}
+	}
+	for k := range r.b {
+		if len(r.b) < maxRateSources {
+			return
+		}
+		delete(r.b, k)
 	}
 }

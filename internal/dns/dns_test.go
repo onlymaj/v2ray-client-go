@@ -269,9 +269,14 @@ func TestTruncation(t *testing.T) {
 	if err != nil || h.Flags&flagTC == 0 || h.ANCount+h.NSCount+h.ARCount != 0 || qq.End != len(tr) {
 		t.Fatalf("truncated %+v %v len %d", h, err, len(tr))
 	}
-	qe := buildQuery(7, "big.example.com", typeA, 4096)
-	if udpLimit(qe) != 4096 {
-		t.Fatalf("edns limit %d", udpLimit(qe))
+	if l := udpLimit(buildQuery(7, "big.example.com", typeA, 600)); l != 600 {
+		t.Fatalf("edns limit %d", l)
+	}
+	// A spoofed query must not get a big UDP reply: the EDNS size is
+	// capped and larger answers go over TCP.
+	qe := buildQuery(7, "big.example.com", typeA, 65535)
+	if udpLimit(qe) != maxUDPSize {
+		t.Fatalf("edns limit %d, want %d", udpLimit(qe), maxUDPSize)
 	}
 	if got := truncate(big, udpLimit(qe)); !bytes.Equal(got, big) {
 		t.Fatal("truncated within EDNS limit")

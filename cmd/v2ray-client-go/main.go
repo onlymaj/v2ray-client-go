@@ -42,6 +42,7 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/health"
 	"github.com/onlymaj/v2ray-client-go/internal/inbound"
 	"github.com/onlymaj/v2ray-client-go/internal/netfilter"
+	"github.com/onlymaj/v2ray-client-go/internal/netguard"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/routeros"
 	"github.com/onlymaj/v2ray-client-go/internal/stats"
@@ -112,6 +113,15 @@ func run() error {
 				target = "g:" + r.GroupID
 			}
 			return r.RuleID + "|" + r.Kind + "|" + target
+		},
+		// Under DNS Option B the router forwards every LAN query, so they all
+		// arrive from the gateway: give it (and the container itself) a much
+		// higher per-source budget than a single LAN device.
+		SourceLimit: func(src netip.Addr) (int, int) {
+			if netguard.Refused(src) {
+				return 256, 1000
+			}
+			return 0, 0 // defaults
 		},
 		Logf: log.Printf,
 	})
