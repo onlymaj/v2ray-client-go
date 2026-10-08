@@ -103,8 +103,8 @@ export function ClientDetail({ id }) {
           <CardHeader><CardTitle>Details</CardTitle></CardHeader>
           <dl className="m-0 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-[13px] [&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:[overflow-wrap:anywhere] [&_dt]:text-muted-foreground">
             <dt>Transport</dt><dd className="flex flex-wrap gap-1"><Badge>{transport(c)}</Badge><TrustBadges c={c} /></dd>
-            <dt>Server</dt><dd className="font-mono text-xs text-info">{c.address}:{c.port}</dd>
-            {c.sni && <><dt>SNI</dt><dd className="font-mono text-xs text-info">{c.sni}</dd></>}
+            <dt>Server</dt><dd className="font-mono text-xs">{c.address}:{c.port}</dd>
+            {c.sni && <><dt>SNI</dt><dd className="font-mono text-xs">{c.sni}</dd></>}
             <dt>Last success</dt><dd>{fmtAgo(c.status.lastSuccess)}</dd>
             <dt>Last check</dt><dd>{fmtAgo(c.status.lastCheck)}</dd>
             <dt>Connections</dt><dd>{r.conns ?? 0}</dd>
