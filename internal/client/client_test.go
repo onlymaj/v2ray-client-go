@@ -202,3 +202,75 @@ func TestSameTransport(t *testing.T) {
 		t.Fatal("ALPN change not detected")
 	}
 }
+
+// Warm pooled conns that the server dropped are replaced transparently on
+// first use, with the written data replayed.
+func TestRetryDeadPooledConn(t *testing.T) {
+	fakeProtocol(t, "vless")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				// Drop conns that stay silent (idle pooled ones).
+				c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+				b := make([]byte, 1)
+				if _, err := c.Read(b); err != nil {
+					c.Close()
+					return
+				}
+				c.SetReadDeadline(time.Time{})
+				c.Write(b)
+				io.Copy(c, c)
+				c.Close()
+			}()
+		}
+	}()
+	c := base()
+	c.Address, c.Port, c.TLS = "127.0.0.1", uint16(ln.Addr().(*net.TCPAddr).Port), "none"
+	cl, err := Build(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+	ctx := context.Background()
+	dest := outbound.Addr{Domain: "x.test", Port: 80}
+	for i := 0; i < 2; i++ { // two dials: the client is busy, the pool warms
+		conn, err := cl.Dial(ctx, "tcp", dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conn.Close()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for cl.pool.Len() < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if cl.pool.Len() < 2 {
+		t.Fatal("pool did not warm")
+	}
+	time.Sleep(150 * time.Millisecond) // server drops the idle conns
+
+	conn, err := cl.Dial(ctx, "tcp", dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, ok := conn.(*retryConn); !ok {
+		t.Fatalf("pooled dial not wrapped: %T", conn)
+	}
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	conn.Write([]byte("ping"))
+	want := "x.test:80\nping"
+	got := make([]byte, len(want))
+	if _, err := io.ReadFull(conn, got); err != nil || string(got) != want {
+		t.Fatalf("got %q, %v; want %q", got, err, want)
+	}
+}

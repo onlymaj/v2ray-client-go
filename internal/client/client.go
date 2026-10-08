@@ -200,17 +200,43 @@ func (c *Client) dialTransport(ctx context.Context) (net.Conn, error) {
 	return nc, nil
 }
 
+// reusedKey carries a *bool through the protocol's Dial so transport can
+// report whether it handed out a warm pooled conn.
+type reusedKey struct{}
+
 // transport is what the protocol layer calls: pooled when possible.
 func (c *Client) transport(ctx context.Context) (net.Conn, error) {
-	if c.pool != nil {
-		return c.pool.Get(ctx)
+	if c.pool == nil {
+		return c.dialTransport(ctx)
 	}
-	return c.dialTransport(ctx)
+	conn, reused, err := c.pool.Get(ctx)
+	if p, ok := ctx.Value(reusedKey{}).(*bool); ok {
+		*p = reused
+	}
+	return conn, err
 }
 
-// Dial opens a proxied connection to dest.
+// Dial opens a proxied connection to dest. If it rides on a warm pooled
+// transport conn that turns out to be dead, it is retried once on a fresh
+// dial: immediately if the protocol Dial fails, else on first use (see
+// retryConn).
 func (c *Client) Dial(ctx context.Context, network string, dest outbound.Addr) (net.Conn, error) {
-	return c.dialer.Dial(ctx, network, dest)
+	if c.pool == nil {
+		return c.dialer.Dial(ctx, network, dest)
+	}
+	var reused bool
+	conn, err := c.dialer.Dial(context.WithValue(ctx, reusedKey{}, &reused), network, dest)
+	if !reused {
+		return conn, err
+	}
+	if err != nil {
+		return c.probe.Dial(ctx, network, dest)
+	}
+	return newRetryConn(conn, func() (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		defer cancel()
+		return c.probe.Dial(ctx, network, dest)
+	}), nil
 }
 
 // Probe is Dial without the warm pool, for health checks: it neither uses

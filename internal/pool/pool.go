@@ -5,8 +5,14 @@
 // VLESS and VMess need a fresh transport connection per proxied
 // connection, so a pooled conn is consumed by Get and never returned.
 // Warming only happens for clients carrying traffic: after a Get that
-// follows another Get within TTL, the pool refills in the background, one
-// dial at a time, up to Max. Idle conns older than TTL are closed.
+// follows another Get within BusyWindow (60s), the pool refills in the
+// background, one dial at a time, up to Max.
+//
+// Idle conns are closed after MaxAge (30s, shorter than the 60s traffic
+// window): servers, middleboxes and CDNs may drop idle conns, and because
+// VLESS/VMess write their header lazily a dead conn is only noticed on
+// first use. Get reports whether a conn was reused so the caller can retry
+// once on a fresh dial (see internal/client).
 package pool
 
 import (
@@ -18,7 +24,8 @@ import (
 
 const (
 	DefaultMax  = 2
-	DefaultTTL  = 60 * time.Second
+	MaxAge      = 30 * time.Second
+	BusyWindow  = 60 * time.Second
 	dialTimeout = 10 * time.Second
 )
 
@@ -31,7 +38,8 @@ type entry struct {
 type Pool struct {
 	dial func(ctx context.Context) (net.Conn, error)
 	max  int
-	ttl  time.Duration
+	ttl  time.Duration    // MaxAge
+	busy time.Duration    // BusyWindow
 	now  func() time.Time // for tests
 
 	mu      sync.Mutex
@@ -44,16 +52,16 @@ type Pool struct {
 
 // New returns a pool that opens transport conns with dial.
 func New(dial func(ctx context.Context) (net.Conn, error)) *Pool {
-	return &Pool{dial: dial, max: DefaultMax, ttl: DefaultTTL, now: time.Now}
+	return &Pool{dial: dial, max: DefaultMax, ttl: MaxAge, busy: BusyWindow, now: time.Now}
 }
 
-// Get returns a warm conn if one is fresh, otherwise dials a new one.
-func (p *Pool) Get(ctx context.Context) (net.Conn, error) {
+// Get returns a warm conn if one is fresh (reused = true), otherwise dials
+// a new one.
+func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 	p.mu.Lock()
 	now := p.now()
-	busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.ttl
+	busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
 	p.lastGet = now
-	var c net.Conn
 	for len(p.idle) > 0 && c == nil {
 		e := p.idle[len(p.idle)-1] // newest
 		p.idle = p.idle[:len(p.idle)-1]
@@ -69,9 +77,10 @@ func (p *Pool) Get(ctx context.Context) (net.Conn, error) {
 	}
 	p.mu.Unlock()
 	if c != nil {
-		return c, nil
+		return c, true, nil
 	}
-	return p.dial(ctx)
+	c, err = p.dial(ctx)
+	return c, false, err
 }
 
 // fill dials until the pool holds max conns, the client goes quiet, or a
@@ -95,7 +104,7 @@ func (p *Pool) fill() {
 		if p.timer == nil {
 			p.timer = time.AfterFunc(p.ttl, p.sweep)
 		}
-		if len(p.idle) >= p.max || now.Sub(p.lastGet) >= p.ttl {
+		if len(p.idle) >= p.max || now.Sub(p.lastGet) >= p.busy {
 			p.filling = false
 			p.mu.Unlock()
 			return

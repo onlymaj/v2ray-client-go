@@ -73,7 +73,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestNoWarmingOnFirstUse(t *testing.T) {
 	p, d, _ := newTest()
 	defer p.Close()
-	if _, err := p.Get(context.Background()); err != nil {
+	if _, _, err := p.Get(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
@@ -96,8 +96,8 @@ func TestWarmAndReuse(t *testing.T) {
 	p.mu.Lock()
 	newest := p.idle[1].c
 	p.mu.Unlock()
-	c, _ := p.Get(ctx)
-	if c != newest {
+	c, reused, _ := p.Get(ctx)
+	if c != newest || !reused {
 		t.Fatalf("got conn %d, want newest warm conn", c.(*fakeConn).id)
 	}
 	waitFor(t, func() bool { return p.Len() == 2 })
@@ -110,12 +110,12 @@ func TestStaleConnNotUsed(t *testing.T) {
 	p.Get(ctx)
 	p.Get(ctx)
 	waitFor(t, func() bool { return p.Len() == 2 })
-	clk.add(DefaultTTL + time.Second)
+	clk.add(MaxAge + time.Second)
 	p.mu.Lock()
 	stale := []net.Conn{p.idle[0].c, p.idle[1].c}
 	p.mu.Unlock()
-	c, _ := p.Get(ctx)
-	if c == stale[0] || c == stale[1] {
+	c, reused, _ := p.Get(ctx)
+	if reused || c == stale[0] || c == stale[1] {
 		t.Fatal("got a stale conn")
 	}
 	for _, s := range stale {
@@ -138,7 +138,7 @@ func TestSweepAndClose(t *testing.T) {
 		t.Fatal("no warm conns dialed")
 	}
 	p.Close()
-	if _, err := p.Get(ctx); err != nil {
+	if _, _, err := p.Get(ctx); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -151,7 +151,7 @@ func TestDialErrorStopsFill(t *testing.T) {
 	d.mu.Lock()
 	d.fail = true
 	d.mu.Unlock()
-	if _, err := p.Get(ctx); err == nil {
+	if _, _, err := p.Get(ctx); err == nil {
 		t.Fatal("want error")
 	}
 	time.Sleep(20 * time.Millisecond)
