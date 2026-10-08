@@ -217,10 +217,14 @@ func (a *auth) valid(r *http.Request) bool {
 	return true
 }
 
+// drop ends the session r carries, but only for a request from the IP the
+// session is bound to: like valid, a stolen copy cannot log the owner out.
 func (a *auth) drop(r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil {
 		a.mu.Lock()
-		delete(a.sessions, c.Value)
+		if e, ok := a.sessions[c.Value]; ok && e.ip == clientIP(r) {
+			delete(a.sessions, c.Value)
+		}
 		a.mu.Unlock()
 	}
 }
