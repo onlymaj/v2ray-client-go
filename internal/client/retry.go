@@ -17,8 +17,13 @@ const retryLimit = 16 << 10
 // conn was dead), it dials once more without the pool, replays the
 // recorded data and carries on there. VLESS/VMess send their header with
 // the first Write (or before the first Read), so a dead conn surfaces here
-// rather than in Dial. A server that legitimately closes before sending
-// anything is retried once too, which only costs one extra dial.
+// rather than in Dial.
+//
+// A failed Read or Write cannot tell a conn that was dead from one that
+// delivered the earlier data and was then reset (by the server, or by an
+// on-path attacker injecting a RST), so that data is replayed only if it is
+// harmless: nothing, or only complete TLS handshake records (a ClientHello). Replaying a plaintext request such as an HTTP
+// POST could run it twice at the destination.
 type retryConn struct {
 	redial func() (net.Conn, error)
 
@@ -83,6 +88,10 @@ func (r *retryConn) Write(p []byte) (int, error) {
 		}
 		return n, nil
 	}
+	if !onlyTLSHandshake(r.sent) {
+		r.armed, r.sent = false, nil
+		return n, err
+	}
 	if r.retryLocked(old) != nil {
 		return n, err
 	}
@@ -105,13 +114,34 @@ func (r *retryConn) Read(p []byte) (int, error) {
 		return n, err
 	}
 	r.mu.Lock()
-	rerr := r.retryLocked(c)
+	rerr := net.ErrClosed
+	if r.cur != c || onlyTLSHandshake(r.sent) {
+		rerr = r.retryLocked(c)
+	} else {
+		r.armed, r.sent = false, nil
+	}
 	nc := r.cur
 	r.mu.Unlock()
 	if rerr != nil || nc == c {
 		return n, err
 	}
 	return nc.Read(p)
+}
+
+// onlyTLSHandshake reports whether b is a whole number of TLS handshake
+// records (type 0x16, version 3.x), e.g. a ClientHello. Empty b counts.
+func onlyTLSHandshake(b []byte) bool {
+	for len(b) > 0 {
+		if len(b) < 5 || b[0] != 0x16 || b[1] != 0x03 {
+			return false
+		}
+		n := int(b[3])<<8 | int(b[4])
+		if n == 0 || len(b)-5 < n {
+			return false
+		}
+		b = b[5+n:]
+	}
+	return true
 }
 
 func (r *retryConn) Close() error {

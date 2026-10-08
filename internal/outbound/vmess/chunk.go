@@ -45,8 +45,8 @@ const bufSize = 8192
 // also yields the padding length, drawn before the size mask.
 type chunkCodec struct {
 	aead    cipher.AEAD
-	nonce   []byte // IV copy; first 2 bytes replaced by the chunk counter
-	count   uint16
+	nonce   []byte      // IV copy; first 2 bytes replaced by the chunk counter
+	count   int         // chunks sealed or opened; at most maxChunks
 	shake   *sha3.SHAKE // nil: plain sizes
 	padding bool
 }
@@ -79,11 +79,21 @@ func chachaKey(k []byte) []byte {
 	return append(a[:], b[:]...)
 }
 
-// nextNonce mirrors encoding/client.go GenerateChunkNonce.
-func (c *chunkCodec) nextNonce() []byte {
-	binary.BigEndian.PutUint16(c.nonce, c.count)
+// maxChunks is the number of distinct 16-bit chunk counters. Xray's
+// GenerateChunkNonce wraps after that and reuses nonces under the same key
+// (about 512 MiB into a stream); we fail the stream instead.
+const maxChunks = 1 << 16
+
+var errNonceExhausted = errors.New("vmess: chunk nonce space exhausted")
+
+// nextNonce mirrors encoding/client.go GenerateChunkNonce, without the wrap.
+func (c *chunkCodec) nextNonce() ([]byte, error) {
+	if c.count >= maxChunks {
+		return nil, errNonceExhausted
+	}
+	binary.BigEndian.PutUint16(c.nonce, uint16(c.count))
 	c.count++
-	return c.nonce[:c.aead.NonceSize()]
+	return c.nonce[:c.aead.NonceSize()], nil
 }
 
 func (c *chunkCodec) mask() uint16 {
@@ -125,22 +135,26 @@ func (c *chunkCodec) maxPayload() int {
 
 // seal appends one chunk carrying p (len(p) <= maxPayload) to dst. An empty p
 // is the end-of-stream marker (Xray writes an empty MultiBuffer on EOF).
-func (c *chunkCodec) seal(dst, p []byte) []byte {
+func (c *chunkCodec) seal(dst, p []byte) ([]byte, error) {
 	if c.aead == nil {
 		dst = binary.BigEndian.AppendUint16(dst, uint16(len(p))^c.mask())
-		return append(dst, p...)
+		return append(dst, p...), nil
+	}
+	nonce, err := c.nextNonce()
+	if err != nil {
+		return dst, err
 	}
 	// AuthenticationWriter.seal: padding length first, then the size mask.
 	pad := c.nextPadding()
 	size := len(p) + c.overhead() + pad
 	dst = binary.BigEndian.AppendUint16(dst, uint16(size)^c.mask())
-	dst = c.aead.Seal(dst, c.nextNonce(), p, nil)
+	dst = c.aead.Seal(dst, nonce, p, nil)
 	if pad > 0 {
 		start := len(dst)
 		dst = append(dst, make([]byte, pad)...)
 		rand.Read(dst[start:])
 	}
-	return dst
+	return dst, nil
 }
 
 // open reads one chunk from r and returns its plaintext; io.EOF marks the
@@ -176,7 +190,11 @@ func (c *chunkCodec) open(r io.Reader, buf []byte) ([]byte, error) {
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
 	}
-	pt, err := c.aead.Open(buf[:0], c.nextNonce(), buf[:size-pad], nil)
+	nonce, err := c.nextNonce()
+	if err != nil {
+		return nil, err
+	}
+	pt, err := c.aead.Open(buf[:0], nonce, buf[:size-pad], nil)
 	if err != nil {
 		return nil, errors.New("vmess: chunk authentication failed")
 	}

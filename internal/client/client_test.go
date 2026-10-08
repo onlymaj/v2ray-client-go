@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"syscall"
 	"testing"
 	"time"
 
@@ -267,10 +268,131 @@ func TestRetryDeadPooledConn(t *testing.T) {
 		t.Fatalf("pooled dial not wrapped: %T", conn)
 	}
 	conn.SetDeadline(time.Now().Add(3 * time.Second))
-	conn.Write([]byte("ping"))
-	want := "x.test:80\nping"
+	conn.Write(clientHello) // only handshake records are replayed
+	want := "x.test:80\n" + string(clientHello)
 	got := make([]byte, len(want))
 	if _, err := io.ReadFull(conn, got); err != nil || string(got) != want {
 		t.Fatalf("got %q, %v; want %q", got, err, want)
+	}
+}
+
+// clientHello is a complete TLS handshake record, as an inner TLS client
+// sends first.
+var clientHello = []byte{0x16, 0x03, 0x01, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00}
+
+// scriptConn is a fake proxied conn: Writes are recorded, Reads return the
+// scripted data and then readErr.
+type scriptConn struct {
+	net.Conn
+	writeErr error // returned by Writes after the first
+	wrote    []byte
+	data     []byte
+	readErr  error
+	closed   bool
+}
+
+func (c *scriptConn) Write(p []byte) (int, error) {
+	if c.writeErr != nil && len(c.wrote) > 0 {
+		return 0, c.writeErr
+	}
+	c.wrote = append(c.wrote, p...)
+	return len(p), nil
+}
+func (c *scriptConn) Close() error { c.closed = true; return nil }
+func (c *scriptConn) Read(p []byte) (int, error) {
+	if len(c.data) > 0 {
+		n := copy(p, c.data)
+		c.data = c.data[n:]
+		return n, nil
+	}
+	return 0, c.readErr
+}
+
+func TestRetryReplayPolicy(t *testing.T) {
+	post := []byte("POST /transfer HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok")
+	for _, tc := range []struct {
+		name     string
+		writes   [][]byte
+		received string // bytes the dead conn returns before failing
+		replay   bool
+	}{
+		{"nothing sent", nil, "", true},
+		{"client hello", [][]byte{clientHello}, "", true},
+		{"two handshake records", [][]byte{clientHello, clientHello}, "", true},
+		{"plaintext post", [][]byte{post}, "", false},
+		{"hello then app data", [][]byte{clientHello, {0x17, 0x03, 0x03, 0x00, 0x01, 0x00}}, "", false},
+		{"partial hello", [][]byte{clientHello[:7]}, "", false},
+		{"after a received byte", [][]byte{clientHello}, "x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := &scriptConn{data: []byte(tc.received), readErr: io.EOF}
+			fresh := &scriptConn{data: []byte("reply"), readErr: io.EOF}
+			dials := 0
+			rc := newRetryConn(old, func() (net.Conn, error) { dials++; return fresh, nil })
+			for _, w := range tc.writes {
+				if _, err := rc.Write(w); err != nil {
+					t.Fatal(err)
+				}
+			}
+			buf := make([]byte, 16)
+			if tc.received != "" {
+				if n, err := rc.Read(buf); err != nil || string(buf[:n]) != tc.received {
+					t.Fatalf("first read: %q %v", buf[:n], err)
+				}
+			}
+			n, err := rc.Read(buf)
+			if !tc.replay {
+				if dials != 0 || err != io.EOF || n != 0 {
+					t.Fatalf("replayed: dials=%d n=%d err=%v", dials, n, err)
+				}
+				return
+			}
+			var sent []byte
+			for _, w := range tc.writes {
+				sent = append(sent, w...)
+			}
+			if dials != 1 || !old.closed || string(fresh.wrote) != string(sent) {
+				t.Fatalf("dials=%d oldClosed=%v replayed %q, want %q", dials, old.closed, fresh.wrote, sent)
+			}
+			if err != nil || string(buf[:n]) != "reply" {
+				t.Fatalf("read after replay: %q %v", buf[:n], err)
+			}
+		})
+	}
+}
+
+// A RST between two Writes: the second Write fails. Earlier plaintext may
+// already have reached the destination, so it is not replayed; earlier
+// handshake records are.
+func TestRetryWriteFailurePolicy(t *testing.T) {
+	post := []byte("POST /transfer HTTP/1.1\r\n")
+	for _, tc := range []struct {
+		name   string
+		first  []byte
+		replay bool
+	}{
+		{"plaintext", post, false},
+		{"client hello", clientHello, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := &scriptConn{writeErr: syscall.ECONNRESET}
+			fresh := &scriptConn{}
+			dials := 0
+			rc := newRetryConn(old, func() (net.Conn, error) { dials++; return fresh, nil })
+			if _, err := rc.Write(tc.first); err != nil {
+				t.Fatal(err)
+			}
+			_, err := rc.Write([]byte("body"))
+			if !tc.replay {
+				if dials != 0 || err != syscall.ECONNRESET {
+					t.Fatalf("replayed: dials=%d err=%v", dials, err)
+				}
+				return
+			}
+			want := string(tc.first) + "body"
+			if err != nil || dials != 1 || string(fresh.wrote) != want {
+				t.Fatalf("dials=%d err=%v wrote %q, want %q", dials, err, fresh.wrote, want)
+			}
+		})
 	}
 }

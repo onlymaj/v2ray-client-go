@@ -245,7 +245,11 @@ func (c *clientConn) Write(p []byte) (int, error) {
 		// Batch a few chunks per syscall.
 		c.wbuf = append(c.wbuf[:0], c.header...)
 		for len(chunk) > 0 && len(c.wbuf) < 4*bufSize {
-			c.wbuf = c.enc.seal(c.wbuf, chunk)
+			var err error
+			if c.wbuf, err = c.enc.seal(c.wbuf, chunk); err != nil {
+				c.Conn.Close()
+				return n, err
+			}
 			p = p[len(chunk):]
 			n += len(chunk)
 			chunk = p[:min(len(p), c.enc.maxPayload())]
@@ -279,7 +283,11 @@ func (c *clientConn) CloseWrite() error {
 	}
 	c.wclosed = true
 	if c.enc != nil {
-		c.wbuf = c.enc.seal(append(c.wbuf[:0], c.header...), nil)
+		var err error
+		if c.wbuf, err = c.enc.seal(append(c.wbuf[:0], c.header...), nil); err != nil {
+			c.Conn.Close()
+			return err
+		}
 		c.header = nil
 		if _, err := c.Conn.Write(c.wbuf); err != nil {
 			return err
@@ -328,6 +336,9 @@ func (c *clientConn) Read(p []byte) (int, error) {
 	for {
 		pt, err := c.dec.open(c.br, c.rbuf)
 		if err != nil {
+			if err == errNonceExhausted {
+				c.Conn.Close()
+			}
 			c.rerr = err
 			return 0, err
 		}

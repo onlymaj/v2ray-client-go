@@ -139,7 +139,10 @@ func TestChunkRoundTrip(t *testing.T) {
 				m := make([]byte, n)
 				rand.Read(m)
 				msgs = append(msgs, m)
-				wire = enc.seal(wire, m)
+				var err error
+				if wire, err = enc.seal(wire, m); err != nil {
+					t.Fatal(err)
+				}
 			}
 			r := bytes.NewReader(wire)
 			for i, m := range msgs[:len(msgs)-1] {
@@ -156,6 +159,38 @@ func TestChunkRoundTrip(t *testing.T) {
 			if want := enc.overhead(); r.Len() < want {
 				t.Fatalf("%s opt=%x: %d trailing bytes, want >= %d", name, opt, r.Len(), want)
 			}
+		}
+	}
+}
+
+// The 16-bit chunk counter must not wrap: sealing or opening the 65537th
+// chunk under one key fails instead of reusing nonce 0.
+func TestChunkNonceExhausted(t *testing.T) {
+	for name, sec := range securities {
+		key, iv := make([]byte, 16), make([]byte, 16)
+		opt := byte(optChunkStream | optChunkMasking)
+		enc, dec := newChunkCodec(sec, key, iv, opt), newChunkCodec(sec, key, iv, opt)
+		if enc.aead == nil {
+			continue // security none: no nonces
+		}
+		enc.count, dec.count = maxChunks-1, maxChunks-1
+		wire, err := enc.seal(nil, []byte("last"))
+		if err != nil {
+			t.Fatalf("%s: last chunk: %v", name, err)
+		}
+		if _, err := enc.seal(wire, []byte("wrap")); err != errNonceExhausted {
+			t.Fatalf("%s: seal past the counter gave %v", name, err)
+		}
+		r := bytes.NewReader(wire)
+		if got, err := dec.open(r, nil); err != nil || string(got) != "last" {
+			t.Fatalf("%s: open last chunk: %q %v", name, got, err)
+		}
+		// A server that keeps going: same key, counter would wrap to 0.
+		srv := newChunkCodec(sec, key, iv, opt)
+		srv.shake, dec.shake = nil, nil // plain sizes so the stream can be resynced
+		more, _ := srv.seal(nil, []byte("wrap"))
+		if _, err := dec.open(bytes.NewReader(more), nil); err != errNonceExhausted {
+			t.Fatalf("%s: open past the counter gave %v", name, err)
 		}
 	}
 }
@@ -202,14 +237,18 @@ func fakeServer(t *testing.T, conn net.Conn, cmdKey [16]byte, wantSec, wantOpt b
 	for {
 		p, err := dec.open(br, nil)
 		if err == io.EOF {
-			out = enc.seal(out, nil)
+			if out, err = enc.seal(out, nil); err != nil {
+				return err
+			}
 			_, err = conn.Write(out)
 			return err
 		}
 		if err != nil {
 			return err
 		}
-		out = enc.seal(out, p)
+		if out, err = enc.seal(out, p); err != nil {
+			return err
+		}
 		if _, err := conn.Write(out); err != nil {
 			return err
 		}
