@@ -98,7 +98,7 @@ func TestDefaults(t *testing.T) {
 		clear(got)
 		c := base()
 		tc.mod(&c)
-		cl, err := Build(c)
+		cl, err := Build(c, Options{})
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
@@ -137,7 +137,7 @@ func TestBuildErrors(t *testing.T) {
 	} {
 		c := base()
 		mod(&c)
-		if _, err := Build(c); err == nil {
+		if _, err := Build(c, Options{}); err == nil {
 			t.Errorf("Build(%+v) succeeded", c)
 		}
 	}
@@ -162,7 +162,7 @@ func TestDialThroughStack(t *testing.T) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	c := base()
 	c.Address, c.Port, c.TLS = "127.0.0.1", uint16(port), "none"
-	cl, err := Build(c)
+	cl, err := Build(c, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestRetryDeadPooledConn(t *testing.T) {
 	}()
 	c := base()
 	c.Address, c.Port, c.TLS = "127.0.0.1", uint16(ln.Addr().(*net.TCPAddr).Port), "none"
-	cl, err := Build(c)
+	cl, err := Build(c, Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

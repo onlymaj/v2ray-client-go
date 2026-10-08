@@ -46,7 +46,8 @@ const bufSize = 8192
 type chunkCodec struct {
 	aead    cipher.AEAD
 	nonce   []byte      // IV copy; first 2 bytes replaced by the chunk counter
-	count   int         // chunks sealed or opened; at most maxChunks
+	count   int         // chunks sealed or opened; at most maxChunks unless wrap
+	wrap    bool        // let the counter wrap like Xray (see Settings.AllowNonceWrap)
 	shake   *sha3.SHAKE // nil: plain sizes
 	padding bool
 }
@@ -81,14 +82,16 @@ func chachaKey(k []byte) []byte {
 
 // maxChunks is the number of distinct 16-bit chunk counters. Xray's
 // GenerateChunkNonce wraps after that and reuses nonces under the same key
-// (about 512 MiB into a stream); we fail the stream instead.
+// (about 512 MiB into a stream); we fail the stream instead, unless wrap is
+// set because an outer TLS/REALITY layer protects the stream.
 const maxChunks = 1 << 16
 
 var errNonceExhausted = errors.New("vmess: chunk nonce space exhausted")
 
-// nextNonce mirrors encoding/client.go GenerateChunkNonce, without the wrap.
+// nextNonce mirrors encoding/client.go GenerateChunkNonce; it wraps only
+// when c.wrap is set.
 func (c *chunkCodec) nextNonce() ([]byte, error) {
-	if c.count >= maxChunks {
+	if c.count >= maxChunks && !c.wrap {
 		return nil, errNonceExhausted
 	}
 	binary.BigEndian.PutUint16(c.nonce, uint16(c.count))

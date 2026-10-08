@@ -4,10 +4,10 @@ import (
 	"context"
 	"io"
 	"net/netip"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/onlymaj/v2ray-client-go/internal/netguard"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
 )
@@ -35,16 +35,12 @@ func expectClosed(t *testing.T, d *Dispatcher, tr *fakeTracker, dst outbound.Add
 }
 
 func TestHandleRefusesLocal(t *testing.T) {
-	old := selfAddrs
-	selfAddrs = func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("172.17.0.1")} }
-	selfMu.Lock()
-	selfSet = nil
-	selfMu.Unlock()
+	old := netguard.SelfAddrs
+	netguard.SelfAddrs = func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("172.17.0.1")} }
+	netguard.ResetCache()
 	defer func() {
-		selfAddrs = old
-		selfMu.Lock()
-		selfSet = nil
-		selfMu.Unlock()
+		netguard.SelfAddrs = old
+		netguard.ResetCache()
 	}()
 	d, tr := newHandleDispatcher(t)
 	for _, ip := range []string{"127.0.0.1", "0.0.0.0", "169.254.1.1", "224.0.0.1", "172.17.0.1", "::1"} {
@@ -102,12 +98,38 @@ func TestSilentTimeoutLifted(t *testing.T) {
 	<-done
 }
 
-func TestParseGateways(t *testing.T) {
-	tbl := "Iface\tDestination\tGateway \tFlags\n" +
-		"eth0\t00000000\t010011AC\t0003\n" +
-		"eth0\t000011AC\t00000000\t0001\n"
-	got := parseGateways(strings.NewReader(tbl))
-	if len(got) != 1 || got[0] != netip.MustParseAddr("172.17.0.1") {
-		t.Fatalf("got %v", got)
+// Flipping AllowPrivateServers, or a client's SubscriptionID, rebuilds the
+// client so its server dial guard matches; other updates keep it.
+func TestUpdateRebuildsOnPrivatePolicy(t *testing.T) {
+	cfg := testConfig()
+	d, err := New(cfg, &fakeTracker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	a := d.Client("a")
+	if a == nil {
+		t.Fatal("client a not built")
+	}
+	if err := d.Update(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if d.Client("a") != a {
+		t.Fatal("unchanged update rebuilt the client")
+	}
+	cfg.Settings.AllowPrivateServers = true
+	if err := d.Update(cfg); err != nil {
+		t.Fatal(err)
+	}
+	b := d.Client("a")
+	if b == a {
+		t.Fatal("AllowPrivateServers flip did not rebuild the client")
+	}
+	cfg.Clients[0].SubscriptionID = "s1"
+	if err := d.Update(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if d.Client("a") == b {
+		t.Fatal("SubscriptionID change did not rebuild the client")
 	}
 }

@@ -26,6 +26,7 @@
 package grpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -567,12 +568,27 @@ func readMessage(r io.Reader) ([]byte, error) {
 	if n > maxMessage {
 		return nil, fmt.Errorf("grpc: message too large (%d)", n)
 	}
-	msg := make([]byte, n)
-	if _, err := io.ReadFull(r, msg); err != nil {
-		return nil, fmt.Errorf("grpc: truncated message: %w", err)
+	// Grow the buffer as the body arrives instead of allocating n up front:
+	// otherwise a server could pin maxMessage bytes per stream by sending
+	// only a header.
+	var buf bytes.Buffer
+	for rem := int64(n); rem > 0; {
+		step := min(rem, readStep)
+		m, err := io.CopyN(&buf, r, step)
+		rem -= m
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("grpc: truncated message: %w", err)
+		}
 	}
-	return msg, nil
+	return buf.Bytes(), nil
 }
+
+// readStep is how much of a message body readMessage reads (and so
+// allocates) at a time.
+const readStep = 32 << 10
 
 // decodeHunks returns the non-empty field-1 entries of a Hunk or MultiHunk
 // in order, skipping unknown fields (protobuf wire format).

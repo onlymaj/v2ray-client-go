@@ -40,8 +40,9 @@ type Decision struct {
 var ErrBlocked = errors.New("dispatch: blocked")
 
 type clientEntry struct {
-	cfg config.Client
-	c   *client.Client // nil if Build failed
+	cfg          config.Client
+	allowPrivate bool           // client.Options.AllowPrivate it was built with
+	c            *client.Client // nil if Build failed
 }
 
 type groupEntry struct {
@@ -109,16 +110,20 @@ func (d *Dispatcher) Update(cfg *config.Config) error {
 		killSwitch: cfg.Settings.KillSwitch,
 	}
 	var errs []error
+	opts := client.Options{AllowPrivate: cfg.Settings.AllowPrivateServers}
 	for _, cc := range cfg.Clients {
-		if oe := old.clients[cc.ID]; oe != nil && client.SameTransport(oe.cfg, cc) {
-			ns.clients[cc.ID] = &clientEntry{cfg: cc, c: oe.c}
+		// SameTransport ignores SubscriptionID, which decides together with
+		// opts whether private servers are allowed: rebuild when that flips.
+		if oe := old.clients[cc.ID]; oe != nil && client.SameTransport(oe.cfg, cc) &&
+			oe.cfg.SubscriptionID == cc.SubscriptionID && oe.allowPrivate == opts.AllowPrivate {
+			ns.clients[cc.ID] = &clientEntry{cfg: cc, allowPrivate: opts.AllowPrivate, c: oe.c}
 			continue
 		}
-		c, err := client.Build(cc)
+		c, err := client.Build(cc, opts)
 		if err != nil {
 			errs = append(errs, err)
 		}
-		ns.clients[cc.ID] = &clientEntry{cfg: cc, c: c}
+		ns.clients[cc.ID] = &clientEntry{cfg: cc, allowPrivate: opts.AllowPrivate, c: c}
 	}
 	for _, g := range cfg.Groups {
 		if oe := old.groups[g.ID]; oe != nil && oe.sel != nil && reflect.DeepEqual(oe.g, g) {

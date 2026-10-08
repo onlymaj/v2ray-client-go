@@ -31,11 +31,19 @@ type Settings struct {
 	ID       string `json:"id"`
 	Security string `json:"security"` // auto | aes-128-gcm | chacha20-poly1305 | none | zero
 	AlterID  int    `json:"alterId"`  // must be 0: legacy MD5 auth is not supported
+	// AllowNonceWrap lets the 16-bit chunk counter wrap (nonce reuse under
+	// the body key after 65536 chunks) as Xray does, instead of failing the
+	// stream. Set it only when VMess runs inside TLS or REALITY: the outer
+	// AEAD then provides confidentiality and integrity on its own, so a
+	// repeated inner nonce exposes nothing to the network. Without an outer
+	// layer, a wrap would leak the XOR of plaintexts and allow forgeries.
+	AllowNonceWrap bool `json:"allowNonceWrap"`
 }
 
 type dialer struct {
 	cmdKey        [16]byte
 	security      byte // secAES128GCM | secChaCha20 | secNone | secZero
+	nonceWrap     bool // Settings.AllowNonceWrap
 	dialTransport func(ctx context.Context) (net.Conn, error)
 }
 
@@ -51,7 +59,7 @@ func newDialer(settings []byte, dialTransport func(ctx context.Context) (net.Con
 	if err != nil {
 		return nil, err
 	}
-	d := &dialer{dialTransport: dialTransport}
+	d := &dialer{dialTransport: dialTransport, nonceWrap: s.AllowNonceWrap}
 	// common/protocol/id.go NewID: cmdKey = md5(uuid | fixed salt).
 	d.cmdKey = md5.Sum(append(id[:], "c48619fe-8f02-49e0-b9e9-edf763e17e21"...))
 	switch strings.ToLower(s.Security) {
@@ -123,6 +131,9 @@ func (d *dialer) Dial(ctx context.Context, network string, dest outbound.Addr) (
 	c, err := newClientConn(d.cmdKey, d.security, dest)
 	if err != nil {
 		return nil, err
+	}
+	if c.enc != nil {
+		c.enc.wrap, c.dec.wrap = d.nonceWrap, d.nonceWrap
 	}
 	conn, err := d.dialTransport(ctx)
 	if err != nil {

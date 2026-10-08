@@ -12,13 +12,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
+	"github.com/onlymaj/v2ray-client-go/internal/netguard"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/pool"
 	"github.com/onlymaj/v2ray-client-go/internal/transport"
@@ -46,15 +50,47 @@ type Client struct {
 	probe    outbound.Dialer // same, bypassing the pool
 }
 
+// Options carries settings that are not part of the client config.
+type Options struct {
+	// AllowPrivate lets a client that came from a subscription use a server
+	// in a private range (config.Settings.AllowPrivateServers). Clients
+	// added by hand may always do so.
+	AllowPrivate bool
+}
+
+// refusedServer and isPrivate classify server addresses (vars for tests,
+// which run servers on loopback).
+var (
+	refusedServer = netguard.Refused
+	isPrivate     = netguard.Private
+)
+
+// serverGuard is a net.Dialer Control that refuses netguard.Refused
+// addresses and, with blockPrivate, private ones. It sees the resolved
+// address of every attempt, so a hostname cannot rebind around it.
+func serverGuard(blockPrivate bool) func(network, address string, _ syscall.RawConn) error {
+	return func(_, address string, _ syscall.RawConn) error {
+		ap, err := netip.ParseAddrPort(address)
+		if err != nil {
+			return err
+		}
+		if ip := ap.Addr(); refusedServer(ip) || blockPrivate && isPrivate(ip) {
+			return fmt.Errorf("server address %s refused", ip)
+		}
+		return nil
+	}
+}
+
 // Build validates c and builds its transport stack. No connection is made.
-func Build(c config.Client) (*Client, error) {
+func Build(c config.Client, opts Options) (*Client, error) {
 	if c.Address == "" || c.Port == 0 {
 		return nil, errors.New("client " + c.ID + ": address and port are required")
 	}
 	cl := &Client{
 		cfg:    c,
 		server: net.JoinHostPort(c.Address, strconv.Itoa(int(c.Port))),
-		tcp:    net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second},
+		tcp: net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second,
+			Control: serverGuard(c.SubscriptionID != "" && !opts.AllowPrivate)},
 	}
 	sni := c.SNI
 	if sni == "" {
@@ -125,7 +161,10 @@ func Build(c config.Client) (*Client, error) {
 	case "vless":
 		ps, _ = json.Marshal(map[string]any{"id": c.UUID, "flow": c.Flow})
 	case "vmess":
-		ps, _ = json.Marshal(map[string]any{"id": c.UUID, "security": c.Security})
+		// Inside TLS/REALITY the chunk nonce may wrap as in Xray: the outer
+		// AEAD protects the stream (see vmess.Settings.AllowNonceWrap).
+		ps, _ = json.Marshal(map[string]any{"id": c.UUID, "security": c.Security,
+			"allowNonceWrap": cl.security != nil})
 	default:
 		return nil, wrap(c, errors.New("unknown protocol "+c.Protocol))
 	}

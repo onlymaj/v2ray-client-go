@@ -195,6 +195,65 @@ func TestChunkNonceExhausted(t *testing.T) {
 	}
 }
 
+// With wrap set (VMess inside TLS/REALITY) the counter wraps to 0 like
+// Xray's GenerateChunkNonce, and both ends stay in step.
+func TestChunkNonceWrap(t *testing.T) {
+	for name, sec := range securities {
+		key, iv := make([]byte, 16), make([]byte, 16)
+		opt := byte(optChunkStream | optChunkMasking)
+		enc, dec := newChunkCodec(sec, key, iv, opt), newChunkCodec(sec, key, iv, opt)
+		if enc.aead == nil {
+			continue
+		}
+		enc.wrap, dec.wrap = true, true
+		enc.count, dec.count = maxChunks-1, maxChunks-1
+		var wire []byte
+		var err error
+		for _, p := range []string{"last", "wrapped", "again"} {
+			if wire, err = enc.seal(wire, []byte(p)); err != nil {
+				t.Fatalf("%s: seal %q: %v", name, p, err)
+			}
+		}
+		r := bytes.NewReader(wire)
+		for _, want := range []string{"last", "wrapped", "again"} {
+			if got, err := dec.open(r, nil); err != nil || string(got) != want {
+				t.Fatalf("%s: open: %q %v, want %q", name, got, err, want)
+			}
+		}
+		// Counter 65536 must reuse nonce 0 (Xray compatibility).
+		ref := newChunkCodec(sec, key, iv, opt)
+		n0, _ := ref.nextNonce()
+		n0 = append([]byte(nil), n0...)
+		enc.count = maxChunks
+		if n, _ := enc.nextNonce(); !bytes.Equal(n, n0) {
+			t.Fatalf("%s: wrapped nonce %x, want %x", name, n, n0)
+		}
+	}
+}
+
+func TestDialerNonceWrapSetting(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		b, _ := json.Marshal(map[string]any{"id": "11111111-2222-3333-4444-555555555555",
+			"security": "aes-128-gcm", "allowNonceWrap": wrap})
+		d, err := newDialer(b, func(context.Context) (net.Conn, error) {
+			a, _ := net.Pipe()
+			return a, nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := d.Dial(context.Background(), "tcp", outbound.Addr{Domain: "x.test", Port: 80})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cc := c.(*clientConn)
+		if cc.enc.wrap != wrap || cc.dec.wrap != wrap {
+			t.Fatalf("allowNonceWrap=%v: enc %v dec %v", wrap, cc.enc.wrap, cc.dec.wrap)
+		}
+		c.Close()
+	}
+}
+
 // fakeServer decodes one VMess request like encoding/server.go would,
 // checks it, then echoes the body back in the response stream.
 func fakeServer(t *testing.T, conn net.Conn, cmdKey [16]byte, wantSec, wantOpt byte, wantAddr []byte) error {
