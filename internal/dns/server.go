@@ -39,10 +39,12 @@ type Options struct {
 	Upstream string // ip:port or host:port; port defaults to 53
 
 	// RouteKey, if set, returns a key identifying the route Dial would
-	// take for (src, qname). One idle upstream connection per key is kept
-	// for up to IdleTimeout and reused for later queries with the same key.
-	// Without it every query uses a fresh connection.
-	RouteKey func(src netip.Addr, qname string) string
+	// take for (src, qname) to the upstream address dst. It must route
+	// exactly as Dial does, dst included, or a pooled connection could be
+	// reused for a query whose route differs. One idle upstream connection
+	// per key is kept for up to IdleTimeout and reused for later queries
+	// with the same key. Without it every query uses a fresh connection.
+	RouteKey func(src netip.Addr, qname string, dst netip.Addr) string
 
 	MaxInFlight int           // concurrent upstream queries; default 64
 	Timeout     time.Duration // per-query upstream timeout; default 5s
@@ -328,7 +330,7 @@ func (s *Server) Exchange(ctx context.Context, src netip.Addr, query []byte) ([]
 	}
 	key := ""
 	if s.opts.RouteKey != nil {
-		key = s.opts.RouteKey(src, qname) + "|" + up.String()
+		key = s.opts.RouteKey(src, qname, up.IP) + "|" + up.String()
 	}
 
 	// A pooled connection may have been closed by the upstream; retry
@@ -362,13 +364,16 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 	if err := writeMsg(c, query); err != nil {
 		return nil, err
 	}
-	id := binary.BigEndian.Uint16(query)
+	_, q, err := parseQuestion(query)
+	if err != nil {
+		return nil, err
+	}
 	for {
 		resp, err := readMsg(c)
 		if err != nil {
 			return nil, err
 		}
-		if len(resp) >= headerLen && binary.BigEndian.Uint16(resp) == id {
+		if answers(query, q, resp) {
 			if !stop() {
 				return nil, ctx.Err() // deadline was poisoned; don't reuse c
 			}
@@ -377,6 +382,20 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 		}
 		// A stale answer to an earlier, timed-out query: skip it.
 	}
+}
+
+// answers reports whether resp is a response to query: same ID and the
+// same question (an error reply may omit the question).
+func answers(query []byte, q question, resp []byte) bool {
+	h, err := parseHeader(resp)
+	if err != nil || h.Flags&flagQR == 0 || h.ID != binary.BigEndian.Uint16(query) {
+		return false
+	}
+	if h.QDCount == 0 {
+		return h.rcode() != rcodeNoError
+	}
+	_, rq, err := parseQuestion(resp)
+	return err == nil && keyOf(rq) == keyOf(q)
 }
 
 func (s *Server) takeIdle(key string) net.Conn {

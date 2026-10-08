@@ -14,6 +14,29 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 )
 
+// maxHeader bounds the CONNECT request line plus headers.
+const maxHeader = 8 << 10
+
+var errHeaderTooLong = errors.New("http: request header too long")
+
+// capReader returns errHeaderTooLong once n bytes have been read.
+type capReader struct {
+	r io.Reader
+	n int
+}
+
+func (l *capReader) Read(p []byte) (int, error) {
+	if l.n <= 0 {
+		return 0, errHeaderTooLong
+	}
+	if len(p) > l.n {
+		p = p[:l.n]
+	}
+	n, err := l.r.Read(p)
+	l.n -= n
+	return n, err
+}
+
 // ServeHTTP serves HTTP CONNECT proxying. Other methods get 405.
 func ServeHTTP(ctx context.Context, ln net.Listener, h Handler) error {
 	return serve(ctx, ln, func(c net.Conn) {
@@ -31,7 +54,7 @@ func ServeHTTP(ctx context.Context, ln net.Listener, h Handler) error {
 func httpConnect(c net.Conn) (net.Conn, outbound.Addr, error) {
 	c.SetDeadline(time.Now().Add(handshakeTimeout))
 	defer c.SetDeadline(time.Time{})
-	br := bufio.NewReaderSize(c, 4096)
+	br := bufio.NewReaderSize(&capReader{r: c, n: maxHeader}, 4096)
 	req, err := http.ReadRequest(br)
 	if err != nil {
 		c.Write([]byte("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))

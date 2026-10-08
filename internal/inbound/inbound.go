@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 
@@ -22,6 +23,39 @@ type Handler interface {
 }
 
 const handshakeTimeout = 10 * time.Second
+
+// Open connection limits shared by every inbound (vars so tests can lower
+// them). A conn over either limit is closed at once.
+var (
+	maxConns      = 2048
+	maxConnsPerIP = 256
+)
+
+var limits = struct {
+	sync.Mutex
+	total int
+	per   map[netip.Addr]int
+}{per: map[netip.Addr]int{}}
+
+func acquire(ip netip.Addr) bool {
+	limits.Lock()
+	defer limits.Unlock()
+	if limits.total >= maxConns || limits.per[ip] >= maxConnsPerIP {
+		return false
+	}
+	limits.total++
+	limits.per[ip]++
+	return true
+}
+
+func release(ip netip.Addr) {
+	limits.Lock()
+	defer limits.Unlock()
+	limits.total--
+	if limits.per[ip]--; limits.per[ip] <= 0 {
+		delete(limits.per, ip)
+	}
+}
 
 // serve accepts until ctx is done or ln is closed, running handle for each
 // conn in its own goroutine. It returns nil when stopped by ctx.
@@ -44,7 +78,15 @@ func serve(ctx context.Context, ln net.Listener, handle func(net.Conn)) error {
 			return err
 		}
 		delay = 0
-		go handle(c)
+		ip := srcOf(c).Addr()
+		if !acquire(ip) {
+			c.Close()
+			continue
+		}
+		go func() {
+			defer release(ip)
+			handle(c)
+		}()
 	}
 }
 

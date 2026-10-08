@@ -24,6 +24,7 @@ type cacheEntry struct {
 	key     cacheKey
 	resp    []byte
 	ttlOffs []int // offsets of TTL fields to decrement (OPT excluded)
+	qEnd    int   // end of resp's question section
 	stored  time.Time
 	expires time.Time
 }
@@ -71,7 +72,7 @@ func (c *cache) get(query []byte, q question) []byte {
 
 	copy(resp[0:2], query[0:2])
 	// Echo the client's question spelling (DNS 0x20 case randomisation).
-	if q.End <= len(resp) {
+	if q.End == e.qEnd {
 		copy(resp[headerLen:q.End], query[headerLen:q.End])
 	}
 	for _, off := range e.ttlOffs {
@@ -130,7 +131,7 @@ func (c *cache) put(q question, resp []byte) {
 	d = max(minTTL, min(d, maxTTL))
 
 	now := c.now()
-	e := &cacheEntry{key: keyOf(q), resp: append([]byte(nil), resp...), ttlOffs: offs, stored: now, expires: now.Add(d)}
+	e := &cacheEntry{key: keyOf(q), resp: append([]byte(nil), resp...), ttlOffs: offs, qEnd: rq.End, stored: now, expires: now.Add(d)}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.m[e.key]; ok {

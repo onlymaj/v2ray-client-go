@@ -401,7 +401,7 @@ func TestEndToEnd(t *testing.T) {
 	s := New(Options{
 		Dial:     directDial(rec),
 		Upstream: up.ln.Addr().String(),
-		RouteKey: func(src netip.Addr, qname string) string { return "direct" },
+		RouteKey: func(src netip.Addr, qname string, dst netip.Addr) string { return "direct" },
 	})
 	addr := startServer(t, s)
 

@@ -77,10 +77,14 @@ func readName(msg []byte, off int) (string, int, error) {
 			if off+1+l > len(msg) {
 				return "", 0, errMalformed
 			}
+			label := msg[off+1 : off+1+l]
+			if !validLabel(label) {
+				return "", 0, errMalformed
+			}
 			if sb.Len() > 0 {
 				sb.WriteByte('.')
 			}
-			sb.Write(msg[off+1 : off+1+l])
+			sb.Write(label)
 			if sb.Len() > 255 {
 				return "", 0, errMalformed
 			}
@@ -100,6 +104,20 @@ func readName(msg []byte, off int) (string, int, error) {
 			return "", 0, errMalformed // 0x40/0x80 label types are obsolete
 		}
 	}
+}
+
+// validLabel accepts hostname-like labels only, so the dotted form of a
+// name (the cache key) is unambiguous: no '.' or '\' inside a label.
+func validLabel(b []byte) bool {
+	for _, c := range b {
+		switch {
+		case 'a' <= c|0x20 && c|0x20 <= 'z', '0' <= c && c <= '9',
+			c == '-', c == '_', c == '*', c == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // skipName returns the offset just past the name at off without decoding

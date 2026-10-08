@@ -29,6 +29,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -97,9 +98,11 @@ func run() error {
 			c, _, err := d.Dial(ctx, src, qname, dst)
 			return c, err
 		},
-		RouteKey: func(src netip.Addr, qname string) string {
-			r := d.Route(src, qname, netip.Addr{})
-			return r.Kind + ":" + r.ClientID
+		// Pooled upstream conns are shared only by queries that take exactly
+		// the same route (rule, kind and client) to this upstream.
+		RouteKey: func(src netip.Addr, qname string, dst netip.Addr) string {
+			r := d.Route(src, qname, dst)
+			return r.RuleID + "|" + r.Kind + "|" + r.ClientID
 		},
 		Logf: log.Printf,
 	})
@@ -113,11 +116,27 @@ func run() error {
 		if err := d.Update(c); err != nil {
 			log.Printf("config: %v", err)
 		}
+		// Only servers of clients that some group or rule can route to go into
+		// the RouterOS no-proxy list: a subscription can add any hostname, and
+		// whatever it resolves to would then bypass the proxy.
+		used := map[string]bool{}
+		for _, g := range c.Groups {
+			for _, m := range g.Members {
+				used[m] = true
+			}
+		}
+		for _, r := range c.Rules {
+			if r.Target.Kind == "client" {
+				used[r.Target.ID] = true
+			}
+		}
 		var enabled, servers []string
 		for _, cl := range c.Clients {
 			if cl.Enabled {
 				enabled = append(enabled, cl.ID)
-				servers = append(servers, cl.Address)
+				if used[cl.ID] {
+					servers = append(servers, cl.Address)
+				}
 			}
 		}
 		checker.SetClients(enabled)
@@ -134,7 +153,7 @@ func run() error {
 			rosEnabled = false
 			log.Print("routeros: ROS_PASS is set but ROS_URL is not; sync disabled")
 		}
-		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList)
+		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList, r.CertSHA256)
 		ros.SetServers(servers)
 
 		for _, old := range prev.Clients {
@@ -166,6 +185,7 @@ func run() error {
 		Bus:           bus,
 		Runtime:       runtime{ctx: ctx, st: st, hc: checker, d: d},
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
+		AllowedHosts:  splitList(os.Getenv("UI_HOSTS")),
 		Web:           web.Handler(),
 	})
 	if err != nil {
@@ -231,6 +251,17 @@ func run() error {
 	hs.Shutdown(shutCtx)
 	log.Print("stopped")
 	return nil
+}
+
+// splitList parses a comma-separated env value, dropping empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func envOr(k, def string) string {

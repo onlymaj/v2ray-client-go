@@ -41,7 +41,8 @@ var (
 	sniffTimeout    = 300 * time.Millisecond
 	dialTimeout     = 15 * time.Second
 	idleTimeout     = 5 * time.Minute
-	halfOpenTimeout = 5 * time.Second // idle limit once one direction ended
+	silentTimeout   = 30 * time.Second // idle limit until the client sends a byte
+	halfOpenTimeout = 5 * time.Second  // idle limit once one direction ended
 )
 
 const (
@@ -54,27 +55,44 @@ var bufPool = sync.Pool{New: func() any { b := make([]byte, bufSize); return &b 
 // Handle serves one inbound TCP connection to dst and closes it. If
 // sniffable and dst has no domain, the first client bytes are peeked for a
 // TLS SNI or HTTP Host (up to sniffTimeout) and replayed to the outbound.
+// Destinations in the container or on the router are refused, and a
+// domain routed direct is resolved here so dest rules and the refusal
+// apply to the address actually dialed.
 func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr, sniffable bool) {
 	defer conn.Close()
+	if dst.IP.IsValid() && refused(dst.IP) {
+		d.tracker.Open(src, dst.String(), dst.Domain, "refused", "", "").Close()
+		return
+	}
 	domain := dst.Domain
 	var head []byte
 	if sniffable && domain == "" {
 		bp := bufPool.Get().(*[]byte)
-		defer bufPool.Put(bp)
 		var err error
 		head, domain, err = peek(conn, (*bp)[:sniffMax])
+		bufPool.Put(bp)
 		if err != nil {
 			return
 		}
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	defer cancel()
 	dec := d.Route(src.Addr(), domain, dst.IP)
+	if dec.Kind == KindDirect && !dst.IP.IsValid() {
+		ip, err := resolve(ctx, dst.Domain)
+		if err != nil || refused(ip) {
+			d.tracker.Open(src, dst.String(), domain, "refused", "", "").Close()
+			return
+		}
+		dst = outbound.Addr{IP: ip, Port: dst.Port} // dial what was checked
+		dec = d.Route(src.Addr(), domain, ip)
+	}
 	t := d.tracker.Open(src, dst.String(), domain, dec.RuleID, dec.ClientID, dec.GroupID)
 	defer t.Close()
 	if dec.Kind == KindBlock {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 	out, err := d.dial(ctx, dec, domain, dst)
 	cancel()
 	if err != nil {
@@ -87,7 +105,7 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 		}
 		t.AddUp(int64(len(head)))
 	}
-	relay(conn, out, t)
+	relay(conn, out, t, len(head) > 0)
 }
 
 // peek reads client-first data into buf until a domain is found, the
@@ -127,25 +145,39 @@ func peek(conn net.Conn, buf []byte) (head []byte, domain string, err error) {
 }
 
 // watch closes both conns when no data moved for the idle limit, which
-// drops to halfOpenTimeout once one direction has finished.
+// is silentTimeout until the client first sends, and drops to
+// halfOpenTimeout once one direction has finished.
 type watch struct {
-	a, b  net.Conn
-	last  atomic.Int64 // unix nanos of the last read
-	limit atomic.Int64 // nanos
-	once  sync.Once
+	a, b   net.Conn
+	last   atomic.Int64 // unix nanos of the last read
+	limit  atomic.Int64 // nanos
+	silent atomic.Int64 // the silent limit while still in force, else 0
+	once   sync.Once
 
 	mu    sync.Mutex
 	timer *time.Timer
 }
 
-func newWatch(a, b net.Conn) *watch {
+func newWatch(a, b net.Conn, clientSent bool) *watch {
 	w := &watch{a: a, b: b}
 	w.touch()
-	w.limit.Store(int64(idleTimeout))
+	limit := idleTimeout
+	if !clientSent {
+		limit = min(silentTimeout, idleTimeout)
+		w.silent.Store(int64(limit))
+	}
+	w.limit.Store(int64(limit))
 	w.mu.Lock()
-	w.timer = time.AfterFunc(idleTimeout, w.check)
+	w.timer = time.AfterFunc(limit, w.check)
 	w.mu.Unlock()
 	return w
+}
+
+// clientActive lifts the silent limit (but not a half-open one).
+func (w *watch) clientActive() {
+	if s := w.silent.Swap(0); s != 0 {
+		w.limit.CompareAndSwap(s, int64(idleTimeout))
+	}
 }
 
 func (w *watch) touch() { w.last.Store(time.Now().UnixNano()) }
@@ -184,13 +216,17 @@ func (w *watch) abort() {
 }
 
 // relay copies both ways until both directions end, propagating half
-// closes where the conn supports CloseWrite.
-func relay(client, server net.Conn, t Tracked) {
-	w := newWatch(client, server)
+// closes where the conn supports CloseWrite. clientSent tells whether the
+// client already sent data (the sniffed head).
+func relay(client, server net.Conn, t Tracked, clientSent bool) {
+	w := newWatch(client, server, clientSent)
 	defer w.stop()
 	done := make(chan struct{})
 	go func() {
-		copyHalf(server, client, w, t.AddUp)
+		copyHalf(server, client, w, func(n int64) {
+			w.clientActive()
+			t.AddUp(n)
+		})
 		close(done)
 	}()
 	copyHalf(client, server, w, t.AddDown)
