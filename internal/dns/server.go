@@ -12,6 +12,15 @@
 // truncated to header + question with TC set, so the client retries on TCP.
 // At most MaxInFlight upstream queries run at once; a query that gets no
 // upstream answer within Timeout is answered SERVFAIL.
+//
+// With RouteKey set, cached answers are kept per route: an answer fetched
+// over one route (say direct, where the ISP may poison it) is never served
+// to a device whose queries take another (a proxy, or block).
+//
+// Each source (IPv4 address or IPv6 /64) may have at most MaxPerSource
+// upstream queries and MaxPerSource TCP connections open at once; a query
+// over the limit is answered SERVFAIL, a connection over it is closed. TCP
+// clients must send each query within TCPIdleTimeout.
 package dns
 
 import (
@@ -44,19 +53,25 @@ type Options struct {
 	// reused for a query whose route differs. One idle upstream connection
 	// per key is kept for up to IdleTimeout and reused for later queries
 	// with the same key. Without it every query uses a fresh connection.
+	// The route key also partitions the cache.
 	RouteKey func(src netip.Addr, qname string, dst netip.Addr) string
 
-	MaxInFlight int           // concurrent upstream queries; default 64
-	Timeout     time.Duration // per-query upstream timeout; default 5s
-	IdleTimeout time.Duration // pooled connection lifetime; default 10s
-	CacheSize   int           // entries; default 1024
-	Logf        func(format string, args ...any)
+	MaxInFlight    int           // concurrent upstream queries; default 64
+	MaxPerSource   int           // per-source upstream queries and TCP conns; default 16
+	TCPIdleTimeout time.Duration // client TCP read limit per query; default 3s
+	Timeout        time.Duration // per-query upstream timeout; default 5s
+	IdleTimeout    time.Duration // pooled connection lifetime; default 10s
+	CacheSize      int           // entries; default 1024
+	Logf           func(format string, args ...any)
 }
 
 type Server struct {
 	opts  Options
 	cache *cache
 	sem   chan struct{}
+
+	queries  perSource // upstream queries in flight
+	tcpConns perSource // open client TCP conns
 
 	mu       sync.Mutex
 	upstream outbound.Addr
@@ -79,6 +94,12 @@ func New(opts Options) *Server {
 	if opts.IdleTimeout <= 0 {
 		opts.IdleTimeout = 10 * time.Second
 	}
+	if opts.MaxPerSource <= 0 {
+		opts.MaxPerSource = 16
+	}
+	if opts.TCPIdleTimeout <= 0 {
+		opts.TCPIdleTimeout = 3 * time.Second
+	}
 	if opts.CacheSize <= 0 {
 		opts.CacheSize = 1024
 	}
@@ -90,6 +111,9 @@ func New(opts Options) *Server {
 		cache: newCache(opts.CacheSize),
 		sem:   make(chan struct{}, opts.MaxInFlight),
 		idle:  map[string]idleConn{},
+
+		queries:  perSource{max: opts.MaxPerSource, n: map[netip.Addr]int{}},
+		tcpConns: perSource{max: opts.MaxPerSource, n: map[netip.Addr]int{}},
 	}
 	s.SetUpstream(opts.Upstream)
 	return s
@@ -230,14 +254,20 @@ func (s *Server) serveTCP(ctx context.Context, ln net.Listener) error {
 			}
 			return err
 		}
+		src := srcOf(c.RemoteAddr())
+		if !s.tcpConns.acquire(src) {
+			c.Close()
+			continue
+		}
 		select {
 		case conns <- struct{}{}:
 		default:
+			s.tcpConns.release(src)
 			c.Close()
 			continue
 		}
 		go func() {
-			defer func() { <-conns }()
+			defer func() { <-conns; s.tcpConns.release(src) }()
 			s.serveTCPConn(ctx, c)
 		}()
 	}
@@ -250,7 +280,7 @@ func (s *Server) serveTCPConn(ctx context.Context, c net.Conn) {
 	defer stop()
 	src := srcOf(c.RemoteAddr())
 	for {
-		c.SetReadDeadline(time.Now().Add(s.opts.IdleTimeout))
+		c.SetReadDeadline(time.Now().Add(s.opts.TCPIdleTimeout))
 		query, err := readMsg(c)
 		if err != nil {
 			return
@@ -292,16 +322,37 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 	if h.Flags&flagQR != 0 {
 		return nil // a response, not a query
 	}
-	if resp := s.cache.get(query, q); resp != nil {
+	up, upErr := s.upstreamAddr()
+	key := s.routeKey(src, q.Name, up)
+	if resp := s.cache.get(query, q, key); resp != nil {
 		return resp
 	}
-	resp, err := s.Exchange(ctx, src, query)
+	if !s.queries.acquire(src) {
+		return errorResponse(query, rcodeServFail) // not logged: a flood would fill the log
+	}
+	defer s.queries.release(src)
+	resp, err := s.exchange(ctx, src, query, q, up, upErr, key)
 	if err != nil {
 		s.opts.Logf("dns: %s %s from %s: %v", q.Name, typeString(q.Type), src, err)
 		return errorResponse(query, rcodeServFail)
 	}
-	s.cache.put(q, resp)
+	s.cache.put(q, key, resp)
 	return resp
+}
+
+func (s *Server) upstreamAddr() (outbound.Addr, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.upstream, s.upErr
+}
+
+// routeKey identifies the route of a query for qname from src to up, for
+// the connection pool and the cache ("" without RouteKey).
+func (s *Server) routeKey(src netip.Addr, qname string, up outbound.Addr) string {
+	if s.opts.RouteKey == nil {
+		return ""
+	}
+	return s.opts.RouteKey(src, strings.ToLower(qname), up.IP) + "|" + up.String()
 }
 
 // Exchange sends query upstream (bypassing the cache) and returns the raw
@@ -311,8 +362,13 @@ func (s *Server) Exchange(ctx context.Context, src netip.Addr, query []byte) ([]
 	if err != nil {
 		return nil, err
 	}
-	qname := strings.ToLower(q.Name)
+	up, upErr := s.upstreamAddr()
+	return s.exchange(ctx, src, query, q, up, upErr, s.routeKey(src, q.Name, up))
+}
 
+// exchange is Exchange with the question, upstream and route key already
+// worked out.
+func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q question, up outbound.Addr, upErr error, key string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
 	defer cancel()
 	select {
@@ -322,15 +378,8 @@ func (s *Server) Exchange(ctx context.Context, src netip.Addr, query []byte) ([]
 		return nil, fmt.Errorf("waiting for a free upstream slot: %w", ctx.Err())
 	}
 
-	s.mu.Lock()
-	up, upErr := s.upstream, s.upErr
-	s.mu.Unlock()
 	if upErr != nil {
 		return nil, upErr
-	}
-	key := ""
-	if s.opts.RouteKey != nil {
-		key = s.opts.RouteKey(src, qname, up.IP) + "|" + up.String()
 	}
 
 	// A pooled connection may have been closed by the upstream; retry
@@ -342,7 +391,7 @@ func (s *Server) Exchange(ctx context.Context, src netip.Addr, query []byte) ([]
 		}
 		c.Close()
 	}
-	c, err := s.opts.Dial(ctx, src, qname, up)
+	c, err := s.opts.Dial(ctx, src, strings.ToLower(q.Name), up)
 	if err != nil {
 		return nil, fmt.Errorf("dial upstream %s: %w", up, err)
 	}
@@ -489,4 +538,41 @@ func typeString(t uint16) string {
 		return "HTTPS"
 	}
 	return "TYPE" + strconv.Itoa(int(t))
+}
+
+// perSource counts something per source (IPv4 address or IPv6 /64) up to
+// max.
+type perSource struct {
+	mu  sync.Mutex
+	max int
+	n   map[netip.Addr]int
+}
+
+func sourceKey(ip netip.Addr) netip.Addr {
+	ip = ip.Unmap()
+	if ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return p.Addr()
+	}
+	return ip
+}
+
+func (p *perSource) acquire(ip netip.Addr) bool {
+	k := sourceKey(ip)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.n[k] >= p.max {
+		return false
+	}
+	p.n[k]++
+	return true
+}
+
+func (p *perSource) release(ip netip.Addr) {
+	k := sourceKey(ip)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.n[k]--; p.n[k] <= 0 {
+		delete(p.n, k)
+	}
 }

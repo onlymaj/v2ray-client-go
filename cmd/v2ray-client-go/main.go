@@ -100,11 +100,18 @@ func run() error {
 			c, _, err := d.Dial(ctx, src, qname, dst)
 			return c, err
 		},
-		// Pooled upstream conns are shared only by queries that take exactly
-		// the same route (rule, kind and client) to this upstream.
+		// Cached answers and pooled upstream conns are shared only by queries
+		// that take the same route to this upstream. Group routes are keyed
+		// by group, not by the member Pick chose: every member may carry that
+		// traffic, and keying by member would split the cache and let a
+		// round-robin key differ from the member Dial uses.
 		RouteKey: func(src netip.Addr, qname string, dst netip.Addr) string {
 			r := d.Route(src, qname, dst)
-			return r.RuleID + "|" + r.Kind + "|" + r.ClientID
+			target := r.ClientID
+			if r.GroupID != "" {
+				target = "g:" + r.GroupID
+			}
+			return r.RuleID + "|" + r.Kind + "|" + target
 		},
 		Logf: log.Printf,
 	})

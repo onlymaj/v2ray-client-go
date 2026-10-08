@@ -3,6 +3,7 @@
 package inbound
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"io"
@@ -25,36 +26,108 @@ type Handler interface {
 const handshakeTimeout = 10 * time.Second
 
 // Open connection limits shared by every inbound (vars so tests can lower
-// them). A conn over either limit is closed at once.
+// them). maxConns is sized for GOMEMLIMIT=32MiB: a relayed conn costs about
+// 20-40 KB (two goroutines, two 16 KB copy buffers, outbound TLS state), so
+// 512 conns stay within ~20 MB. Sources are counted per IPv4 address and
+// per IPv6 /64, so privacy addresses don't multiply the per-source cap.
+//
+// When the global cap is full, a new conn evicts the oldest conn of the
+// source holding the most slots, provided that source holds at least two
+// more than the new conn's source (so two busy sources don't keep evicting
+// each other); otherwise the new conn is closed at once. A few LAN hosts
+// can then never lock everyone else out: each source ends up with a fair
+// share of the slots.
 var (
-	maxConns      = 2048
-	maxConnsPerIP = 256
+	maxConns      = 512
+	maxConnsPerIP = 128
 )
 
 var limits = struct {
 	sync.Mutex
 	total int
-	per   map[netip.Addr]int
-}{per: map[netip.Addr]int{}}
+	per   map[netip.Addr]*list.List // source key -> its *slot, oldest first
+}{per: map[netip.Addr]*list.List{}}
 
-func acquire(ip netip.Addr) bool {
-	limits.Lock()
-	defer limits.Unlock()
-	if limits.total >= maxConns || limits.per[ip] >= maxConnsPerIP {
-		return false
-	}
-	limits.total++
-	limits.per[ip]++
-	return true
+// slot is one open conn counted against the limits.
+type slot struct {
+	conn    net.Conn
+	key     netip.Addr
+	el      *list.Element
+	evicted bool
 }
 
-func release(ip netip.Addr) {
+// sourceKey is the unit the per-source cap counts: the IPv4 address, or the
+// /64 of an IPv6 address.
+func sourceKey(ip netip.Addr) netip.Addr {
+	ip = ip.Unmap()
+	if ip.Is6() {
+		p, _ := ip.Prefix(64)
+		return p.Addr()
+	}
+	return ip
+}
+
+// acquire counts c from ip against the limits, evicting another source's
+// oldest conn if the global cap is full (see maxConns). It returns nil if
+// c must be refused.
+func acquire(c net.Conn, ip netip.Addr) *slot {
+	key := sourceKey(ip)
+	var victim net.Conn
+	defer func() {
+		if victim != nil {
+			victim.Close()
+		}
+	}()
 	limits.Lock()
 	defer limits.Unlock()
-	limits.total--
-	if limits.per[ip]--; limits.per[ip] <= 0 {
-		delete(limits.per, ip)
+	n := 0
+	if l := limits.per[key]; l != nil {
+		n = l.Len()
 	}
+	if n >= maxConnsPerIP {
+		return nil
+	}
+	if limits.total >= maxConns {
+		var heavy *list.List
+		for k, l := range limits.per {
+			if k != key && (heavy == nil || l.Len() > heavy.Len()) {
+				heavy = l
+			}
+		}
+		if heavy == nil || heavy.Len() < n+2 {
+			return nil
+		}
+		old := heavy.Front().Value.(*slot)
+		old.evicted = true
+		removeLocked(old)
+		victim = old.conn
+	}
+	l := limits.per[key]
+	if l == nil {
+		l = list.New()
+		limits.per[key] = l
+	}
+	s := &slot{conn: c, key: key}
+	s.el = l.PushBack(s)
+	limits.total++
+	return s
+}
+
+func release(s *slot) {
+	limits.Lock()
+	defer limits.Unlock()
+	if !s.evicted {
+		removeLocked(s)
+	}
+}
+
+func removeLocked(s *slot) {
+	l := limits.per[s.key]
+	l.Remove(s.el)
+	if l.Len() == 0 {
+		delete(limits.per, s.key)
+	}
+	limits.total--
 }
 
 // serve accepts until ctx is done or ln is closed, running handle for each
@@ -78,13 +151,13 @@ func serve(ctx context.Context, ln net.Listener, handle func(net.Conn)) error {
 			return err
 		}
 		delay = 0
-		ip := srcOf(c).Addr()
-		if !acquire(ip) {
+		s := acquire(c, srcOf(c).Addr())
+		if s == nil {
 			c.Close()
 			continue
 		}
 		go func() {
-			defer release(ip)
+			defer release(s)
 			handle(c)
 		}()
 	}

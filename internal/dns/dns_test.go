@@ -160,12 +160,12 @@ func TestCacheTTLDecrement(t *testing.T) {
 
 	q := buildQuery(1, "example.com", typeA, 0)
 	_, qq, _ := parseQuestion(q)
-	c.put(qq, buildAResponse(q, 300, 120))
+	c.put(qq, "", buildAResponse(q, 300, 120))
 
 	now = now.Add(30 * time.Second)
 	q2 := buildQuery(0xbeef, "EXAMPLE.com", typeA, 0)
 	_, qq2, _ := parseQuestion(q2)
-	got := c.get(q2, qq2)
+	got := c.get(q2, qq2, "")
 	if got == nil {
 		t.Fatal("miss")
 	}
@@ -195,7 +195,7 @@ func TestCacheTTLDecrement(t *testing.T) {
 
 	// Expires at the minimum TTL (120s).
 	now = now.Add(90 * time.Second)
-	if c.get(q2, qq2) != nil {
+	if c.get(q2, qq2, "") != nil {
 		t.Fatal("served after expiry")
 	}
 }
@@ -207,30 +207,30 @@ func TestCacheNegativeAndClamps(t *testing.T) {
 
 	q := buildQuery(1, "nope.example.com", typeA, 0)
 	_, qq, _ := parseQuestion(q)
-	c.put(qq, buildNXDomain(q, 3600, 3600)) // capped to 5 min
+	c.put(qq, "", buildNXDomain(q, 3600, 3600)) // capped to 5 min
 	now = now.Add(299 * time.Second)
-	if c.get(q, qq) == nil {
+	if c.get(q, qq, "") == nil {
 		t.Fatal("negative answer not cached")
 	}
 	now = now.Add(2 * time.Second)
-	if c.get(q, qq) != nil {
+	if c.get(q, qq, "") != nil {
 		t.Fatal("negative answer cached past 5 min")
 	}
 
 	// TTL 0 is held for the 5s minimum.
 	q = buildQuery(1, "zero.example.com", typeA, 0)
 	_, qq, _ = parseQuestion(q)
-	c.put(qq, buildAResponse(q, 0))
+	c.put(qq, "", buildAResponse(q, 0))
 	now = now.Add(4 * time.Second)
-	if c.get(q, qq) == nil {
+	if c.get(q, qq, "") == nil {
 		t.Fatal("ttl 0 not held for 5s")
 	}
 
 	// SERVFAIL is not cached.
 	q = buildQuery(1, "fail.example.com", typeA, 0)
 	_, qq, _ = parseQuestion(q)
-	c.put(qq, errorResponse(q, rcodeServFail))
-	if c.get(q, qq) != nil {
+	c.put(qq, "", errorResponse(q, rcodeServFail))
+	if c.get(q, qq, "") != nil {
 		t.Fatal("SERVFAIL cached")
 	}
 }
@@ -243,15 +243,15 @@ func TestCacheLRU(t *testing.T) {
 		q := buildQuery(1, n, typeA, 0)
 		qs = append(qs, q)
 		_, qq, _ := parseQuestion(q)
-		c.put(qq, buildAResponse(q, 60))
+		c.put(qq, "", buildAResponse(q, 60))
 		if i == 1 {
 			_, qa, _ := parseQuestion(qs[0])
-			c.get(qs[0], qa) // touch a.com so b.com is evicted
+			c.get(qs[0], qa, "") // touch a.com so b.com is evicted
 		}
 	}
 	for i, want := range []bool{true, false, true} {
 		_, qq, _ := parseQuestion(qs[i])
-		if (c.get(qs[i], qq) != nil) != want {
+		if (c.get(qs[i], qq, "") != nil) != want {
 			t.Fatalf("%s present=%v", names[i], !want)
 		}
 	}

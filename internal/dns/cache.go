@@ -18,6 +18,7 @@ type cacheKey struct {
 	name  string // lowercased
 	qtype uint16
 	class uint16
+	route string // Options.RouteKey result; "" in keyOf
 }
 
 type cacheEntry struct {
@@ -43,14 +44,15 @@ func newCache(size int) *cache {
 }
 
 func keyOf(q question) cacheKey {
-	return cacheKey{strings.ToLower(q.Name), q.Type, q.Class}
+	return cacheKey{name: strings.ToLower(q.Name), qtype: q.Type, class: q.Class}
 }
 
 // get returns a copy of the cached response for query with its ID and
 // question bytes taken from query and TTLs decremented by the time spent
-// in the cache, or nil.
-func (c *cache) get(query []byte, q question) []byte {
+// in the cache, or nil. Entries are kept per route.
+func (c *cache) get(query []byte, q question, route string) []byte {
 	k := keyOf(q)
+	k.route = route
 	c.mu.Lock()
 	el, ok := c.m[k]
 	if !ok {
@@ -85,7 +87,7 @@ func (c *cache) get(query []byte, q question) []byte {
 // put stores resp if it is cacheable: NOERROR or NXDOMAIN, not truncated.
 // Positive answers live for the minimum record TTL; negative ones (no
 // answers) for the SOA minimum, capped at 5 minutes.
-func (c *cache) put(q question, resp []byte) {
+func (c *cache) put(q question, route string, resp []byte) {
 	h, rq, err := parseQuestion(resp)
 	if err != nil || h.Flags&flagTC != 0 || keyOf(rq) != keyOf(q) {
 		return
@@ -131,7 +133,9 @@ func (c *cache) put(q question, resp []byte) {
 	d = max(minTTL, min(d, maxTTL))
 
 	now := c.now()
-	e := &cacheEntry{key: keyOf(q), resp: append([]byte(nil), resp...), ttlOffs: offs, qEnd: rq.End, stored: now, expires: now.Add(d)}
+	k := keyOf(q)
+	k.route = route
+	e := &cacheEntry{key: k, resp: append([]byte(nil), resp...), ttlOffs: offs, qEnd: rq.End, stored: now, expires: now.Add(d)}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.m[e.key]; ok {
