@@ -20,6 +20,10 @@ type Client struct {
 	Name           string `json:"name"`
 	Enabled        bool   `json:"enabled"`
 	SubscriptionID string `json:"subscriptionId,omitempty"`
+	// Untrusted marks clients created from pasted share links or a
+	// subscription. They get the same server-address restrictions as
+	// subscription clients until the admin saves them through the form.
+	Untrusted bool `json:"untrusted,omitempty"`
 
 	Protocol string `json:"protocol"` // "vless" | "vmess"
 	Address  string `json:"address"`
