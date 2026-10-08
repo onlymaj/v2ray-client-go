@@ -14,6 +14,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -160,6 +161,9 @@ func legacyReplace(fd int, tbl []byte, hooks, under [5]uint32, numEntries, oldEn
 
 	_, _, e := syscall.Syscall6(syscall.SYS_SETSOCKOPT, uintptr(fd), syscall.SOL_IP, iptSoSetReplace,
 		uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0)
+	// b holds counters' address as a plain integer, invisible to the GC; keep
+	// the buffer alive until the kernel has written the old counters into it.
+	runtime.KeepAlive(counters)
 	if e != 0 {
 		return fmt.Errorf("IPT_SO_SET_REPLACE nat: %w", e)
 	}
