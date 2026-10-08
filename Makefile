@@ -16,16 +16,25 @@ XRAY     := .tools/xray
 
 GOBUILD := CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid="
 
-.PHONY: build build-ui test interop image size probe probe-image clean
+.PHONY: build build-ui embed-ui test interop image size probe probe-image clean
 
-build: $(UPX)
+build: $(UPX) embed-ui
 	@mkdir -p dist
 	$(GOBUILD) -tags "$(TAGS)" -o $(BIN).raw ./cmd/v2ray-client-go
 	rm -f $(BIN) && $(UPX) -q --best --lzma -o $(BIN) $(BIN).raw >/dev/null
 	@ls -l $(BIN).raw $(BIN) | awk '{print $$5, $$9}'
 
 build-ui:
-	cd web && npm ci --no-audit --no-fund && npm run build
+	cd web && npm ci --no-audit --no-fund && npm run size
+
+# Copy the built UI into the embed directory. Only the .gz files are kept;
+# internal/web decompresses on the fly for clients without gzip support.
+embed-ui:
+	@if [ -d web/dist ]; then \
+	  find internal/web/dist -mindepth 1 ! -name .gitkeep -delete; \
+	  cd web/dist && find . -name '*.gz' -exec sh -c 'mkdir -p "../../internal/web/dist/$$(dirname "$$1")" && cp "$$1" "../../internal/web/dist/$$1"' _ {} \; ; \
+	  echo "embedded UI: $$(du -sb ../../internal/web/dist | cut -f1) bytes"; \
+	else echo "web/dist missing: run make build-ui (embedding placeholder)"; fi
 
 test:
 	go vet -tags "$(TAGS)" ./...

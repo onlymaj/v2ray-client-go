@@ -3,3 +3,5 @@
 /web/node_modules/
 /web/dist/
 *.tar
+/internal/web/dist/*
+!/internal/web/dist/.gitkeep
