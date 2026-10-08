@@ -8,10 +8,23 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/router"
 )
 
+// MaxClients caps the number of clients so a malicious subscription or
+// import can't exhaust the router's memory.
+const MaxClients = 1000
+
 // Validate checks references between clients, groups and rules, and that
 // the rules compile. Protocol-specific fields are checked when the client's
 // dialer is built.
 func (c *Config) Validate() error {
+	if len(c.Clients) > MaxClients {
+		return fmt.Errorf("too many clients (%d, limit %d)", len(c.Clients), MaxClients)
+	}
+	if len(c.Groups) > 200 || len(c.Rules) > 1000 || len(c.Subscriptions) > 100 {
+		return errors.New("too many groups, rules or subscriptions")
+	}
+	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(h) {
+		return errors.New("routeros certSha256 must be 64 hex characters")
+	}
 	clients := map[string]bool{}
 	for _, cl := range c.Clients {
 		if cl.ID == "" {
@@ -97,4 +110,16 @@ func (c *Config) RemoveClient(id string) {
 		}
 	}
 	c.Rules = rules
+}
+
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
 }

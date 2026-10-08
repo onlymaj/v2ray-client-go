@@ -96,6 +96,9 @@ type RouterOS struct {
 	User        string `json:"user"`
 	Password    string `json:"password,omitempty"` // never returned by the API
 	AddressList string `json:"addressList"`
+	// CertSHA256 pins the RouterOS HTTPS certificate (hex SHA-256 of the
+	// DER leaf). Empty means the certificate is not verified.
+	CertSHA256 string `json:"certSha256,omitempty"`
 }
 
 const (
@@ -130,7 +133,9 @@ func Default() *Config {
 		Rules:         []router.Rule{{ID: "default", Type: "default", Target: router.Target{Kind: router.KindGroup, ID: "default"}}},
 		Subscriptions: []Subscription{},
 		Settings: Settings{
-			Ports:          Ports{Transparent: 12345, SOCKS: 1080, HTTP: 8118, DNS: 53, UI: 80},
+			// SOCKS and HTTP CONNECT are off by default: they have no
+			// authentication, so any LAN device could use them.
+			Ports:          Ports{Transparent: 12345, SOCKS: 0, HTTP: 0, DNS: 53, UI: 80},
 			HealthURL:      "https://www.gstatic.com/generate_204",
 			HealthInterval: 60,
 			KillSwitch:     KillSwitchBlock,

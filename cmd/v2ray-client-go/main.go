@@ -7,7 +7,11 @@
 //
 //	ADMIN_PASSWORD  required; UI/API login password
 //	CONFIG_DIR      directory holding config.json (default /data)
-//	ROS_URL, ROS_USER, ROS_PASS  override the RouterOS API settings
+//	ROS_URL, ROS_USER, ROS_PASS  override the RouterOS API settings. When
+//	                ROS_PASS is set, the URL must come from ROS_URL too, so a UI
+//	                user can't redirect the env password to another host.
+//	UI_HOSTS        extra host names allowed in the Host header of API
+//	                requests (IP literals are always allowed); DNS rebinding guard
 //	NO_REDIRECT=1   don't install the netfilter REDIRECT (development)
 //
 // Port changes in settings take effect after a restart.
@@ -124,8 +128,13 @@ func run() error {
 		dnsSrv.SetUpstream(c.Settings.DNSUpstream)
 		dnsSrv.Flush()
 		r := c.Settings.RouterOS
-		ros.SetConfig(r.Enabled || os.Getenv("ROS_URL") != "",
-			envOr("ROS_URL", r.URL), envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList)
+		rosURL, rosEnabled := envOr("ROS_URL", r.URL), r.Enabled || os.Getenv("ROS_URL") != ""
+		if os.Getenv("ROS_PASS") != "" && os.Getenv("ROS_URL") == "" {
+			// Never send an env-supplied password to a URL set through the UI.
+			rosEnabled = false
+			log.Print("routeros: ROS_PASS is set but ROS_URL is not; sync disabled")
+		}
+		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList)
 		ros.SetServers(servers)
 
 		for _, old := range prev.Clients {
@@ -191,7 +200,13 @@ func run() error {
 		go func() { errc <- dnsSrv.ListenAndServe(ctx, ":"+strconv.Itoa(int(p.DNS))) }()
 	}
 
-	hs := &http.Server{Addr: ":" + strconv.Itoa(int(p.UI)), Handler: ui, ReadHeaderTimeout: 10 * time.Second}
+	// ReadTimeout bounds slow-body uploads; the SSE handler clears its own
+	// deadlines.
+	hs := &http.Server{
+		Addr: ":" + strconv.Itoa(int(p.UI)), Handler: ui,
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
 	go func() {
 		log.Printf("ui listening on %s", hs.Addr)
 		if err := hs.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
