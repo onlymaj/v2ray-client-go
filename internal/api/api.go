@@ -22,6 +22,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -180,6 +181,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	if !s.hostAllowed(r.Host) {
 		writeErr(w, http.StatusForbidden, "host not allowed")
 		return
@@ -323,17 +327,66 @@ const maxRedirects = 3
 
 var errRedirectBlocked = errors.New("redirect to a local or private address refused")
 
-// fetchClient returns a client for one fetch from origHost. Connections to
-// any other host must go to a public address.
+// fetchLookup resolves host names for subscription fetches (a var so tests
+// can change answers between lookups).
+var fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
+// fetchClient returns a client for one fetch from origHost. origHost is
+// resolved once, on the first dial, and every connection to it in this
+// fetch (same-host redirects included) goes to those pinned addresses, so
+// its DNS cannot be rebound to the LAN mid-fetch. Connections to any other
+// host must go to a public address.
 func fetchClient(origHost string) *http.Client {
+	var (
+		mu     sync.Mutex
+		pinned []netip.Addr
+	)
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
 	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		same := strings.EqualFold(host, origHost)
+		var addrs []netip.Addr
+		if a, err := netip.ParseAddr(host); err == nil {
+			addrs = []netip.Addr{a}
+		} else if same {
+			mu.Lock()
+			if pinned == nil {
+				if pinned, err = fetchLookup(ctx, host); err == nil && len(pinned) == 0 {
+					err = fmt.Errorf("no address for %s", host)
+				}
+				if err != nil {
+					pinned = nil
+					mu.Unlock()
+					return nil, err
+				}
+			}
+			addrs = pinned
+			mu.Unlock()
+		} else if addrs, err = fetchLookup(ctx, host); err != nil {
+			return nil, err
+		}
 		d := net.Dialer{Timeout: 10 * time.Second}
-		if host, _, err := net.SplitHostPort(addr); err != nil || !strings.EqualFold(host, origHost) {
+		if !same {
 			d.Control = publicOnly
 		}
-		return d.DialContext(ctx, network, addr)
+		var last error
+		for _, a := range addrs {
+			c, err := d.DialContext(ctx, network, net.JoinHostPort(a.String(), port))
+			if err == nil {
+				return c, nil
+			}
+			last = err
+		}
+		if last == nil {
+			last = fmt.Errorf("no address for %s", host)
+		}
+		return nil, last
 	}
 	return &http.Client{
 		Transport: tr,
@@ -346,7 +399,7 @@ func fetchClient(origHost string) *http.Client {
 				return nil
 			}
 			// Fail early with a clear error; publicOnly enforces it on dial.
-			addrs, err := net.DefaultResolver.LookupNetIP(req.Context(), "ip", host)
+			addrs, err := fetchLookup(req.Context(), host)
 			if err != nil {
 				return err
 			}

@@ -21,8 +21,11 @@ import (
 var scryptN = 16384
 
 const (
-	cookieName    = "nv2_session"
-	sessionTTL    = 7 * 24 * time.Hour
+	cookieName = "nv2_session"
+	sessionTTL = 7 * 24 * time.Hour
+	// sessionIdle ends a session not used for this long (sliding), within
+	// the sessionTTL cap.
+	sessionIdle   = 12 * time.Hour
 	loginAttempts = 5 // per IP and loginWindow
 	loginWindow   = time.Minute
 	// globalAttempts caps login attempts from all IPs together per
@@ -44,11 +47,22 @@ type auth struct {
 	hashMu sync.Mutex // one scrypt at a time, to cap memory
 
 	mu       sync.Mutex
-	sessions map[string]time.Time  // token -> expiry
+	sessions map[string]*session   // token -> session
 	limits   map[string]*rateEntry // client IP -> attempts in the window
 	global   rateEntry             // attempts from all IPs
 	trusted  map[string]time.Time  // IP -> last successful login
 	now      func() time.Time
+}
+
+// session is bound to the client IP it logged in from.
+type session struct {
+	ip       string
+	expires  time.Time // hard cap: login + sessionTTL
+	lastSeen time.Time // for sessionIdle
+}
+
+func (e *session) expired(now time.Time) bool {
+	return !now.Before(e.expires) || now.Sub(e.lastSeen) >= sessionIdle
 }
 
 type rateEntry struct {
@@ -63,7 +77,7 @@ func newAuth(password string) (*auth, error) {
 	}
 	a := &auth{
 		salt:     make([]byte, 16),
-		sessions: map[string]time.Time{},
+		sessions: map[string]*session{},
 		limits:   map[string]*rateEntry{},
 		trusted:  map[string]time.Time{},
 		now:      time.Now,
@@ -159,22 +173,25 @@ func (a *auth) done(ip string, ok bool) {
 	a.trusted[ip] = now
 }
 
-func (a *auth) newSession() string {
+// newSession starts a session for a login from ip.
+func (a *auth) newSession(ip string) string {
 	var b [32]byte
 	rand.Read(b[:])
 	tok := base64.RawURLEncoding.EncodeToString(b[:])
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
-	for k, exp := range a.sessions {
-		if now.After(exp) {
+	for k, e := range a.sessions {
+		if e.expired(now) {
 			delete(a.sessions, k)
 		}
 	}
-	a.sessions[tok] = now.Add(sessionTTL)
+	a.sessions[tok] = &session{ip: ip, expires: now.Add(sessionTTL), lastSeen: now}
 	return tok
 }
 
+// valid reports whether r carries a live session from the IP that created
+// it, and extends the session's idle timeout.
 func (a *auth) valid(r *http.Request) bool {
 	c, err := r.Cookie(cookieName)
 	if err != nil || c.Value == "" {
@@ -182,12 +199,22 @@ func (a *auth) valid(r *http.Request) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	exp, ok := a.sessions[c.Value]
-	if ok && a.now().After(exp) {
+	e, ok := a.sessions[c.Value]
+	if !ok {
+		return false
+	}
+	now := a.now()
+	if e.expired(now) {
 		delete(a.sessions, c.Value)
 		return false
 	}
-	return ok
+	// A cookie used from another IP is refused but not revoked, so a
+	// stolen copy cannot log the owner out.
+	if e.ip != clientIP(r) {
+		return false
+	}
+	e.lastSeen = now
+	return true
 }
 
 func (a *auth) drop(r *http.Request) {
@@ -234,7 +261,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "wrong password")
 		return
 	}
-	setCookie(w, r, s.auth.newSession(), int(sessionTTL.Seconds()))
+	setCookie(w, r, s.auth.newSession(ip), int(sessionTTL.Seconds()))
 	w.WriteHeader(http.StatusNoContent)
 }
 

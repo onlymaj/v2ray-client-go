@@ -244,3 +244,142 @@ func TestFetchRedirects(t *testing.T) {
 		t.Fatalf("dial hook: %v", err)
 	}
 }
+
+// A same-host redirect to another port opens a new connection; it must go
+// to the address pinned on the first dial even though the host's DNS answer
+// changed in between (rebinding).
+func TestFetchPinnedAcrossConns(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("lan"))
+	}))
+	defer target.Close()
+	_, tport, _ := strings.Cut(strings.TrimPrefix(target.URL, "http://"), ":")
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://sub.example:"+tport+"/", http.StatusFound)
+	}))
+	defer start.Close()
+	_, sport, _ := strings.Cut(strings.TrimPrefix(start.URL, "http://"), ":")
+
+	var mu sync.Mutex
+	answers := []string{"127.0.0.1", "192.0.2.1"} // second: rebound elsewhere
+	n := 0
+	old := fetchLookup
+	fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		a := answers[min(n, len(answers)-1)]
+		n++
+		return []netip.Addr{netip.MustParseAddr(a)}, nil
+	}
+	defer func() { fetchLookup = old }()
+	b, err := defaultFetch(context.Background(), "http://sub.example:"+sport+"/")
+	if err != nil || string(b) != "lan" || n != 1 {
+		t.Fatalf("got %q %v after %d lookups; want the pinned 127.0.0.1 and 1 lookup", b, err, n)
+	}
+}
+
+// A redirect to another name that resolves to a local address is refused
+// at dial time even when CheckRedirect saw a public answer.
+func TestFetchOtherHostRebind(t *testing.T) {
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("secret"))
+	}))
+	defer other.Close()
+	_, oport, _ := strings.Cut(strings.TrimPrefix(other.URL, "http://"), ":")
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://evil.example:"+oport+"/", http.StatusFound)
+	}))
+	defer start.Close()
+	var mu sync.Mutex
+	evil := 0
+	old := fetchLookup
+	fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if host == "evil.example" {
+			if evil++; evil == 1 {
+				return []netip.Addr{netip.MustParseAddr("192.0.2.1")}, nil
+			}
+		}
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	defer func() { fetchLookup = old }()
+	_, sport, _ := strings.Cut(strings.TrimPrefix(start.URL, "http://"), ":")
+	if _, err := defaultFetch(context.Background(), "http://start.example:"+sport+"/"); !errors.Is(err, errRedirectBlocked) {
+		t.Fatalf("rebound redirect target: %v", err)
+	}
+}
+
+func TestAPISecurityHeaders(t *testing.T) {
+	e := newEnv(t)
+	resp, _ := e.do("GET", "/api/me", nil)
+	for k, v := range map[string]string{
+		"X-Frame-Options":         "DENY",
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"Referrer-Policy":         "no-referrer",
+		"X-Content-Type-Options":  "nosniff",
+	} {
+		if got := resp.Header.Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+func sessionReq(tok, remote string) *http.Request {
+	r := httptest.NewRequest("GET", "/api/me", nil)
+	r.RemoteAddr = remote
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: tok})
+	return r
+}
+
+func TestSessionBoundToIP(t *testing.T) {
+	a, err := newAuth("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := a.newSession("192.168.88.10")
+	if !a.valid(sessionReq(tok, "192.168.88.10:5000")) {
+		t.Fatal("same IP refused")
+	}
+	if a.valid(sessionReq(tok, "192.168.88.11:5000")) {
+		t.Fatal("other IP accepted")
+	}
+	if !a.valid(sessionReq(tok, "192.168.88.10:6000")) {
+		t.Fatal("a foreign attempt must not revoke the owner's session")
+	}
+}
+
+func TestSessionIdleTimeout(t *testing.T) {
+	a, err := newAuth("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_000_000, 0)
+	a.now = func() time.Time { return now }
+	const ip = "10.0.0.5:1"
+	tok := a.newSession("10.0.0.5")
+	// Activity every 11 h keeps it alive...
+	for i := 0; i < 5; i++ {
+		now = now.Add(11 * time.Hour)
+		if !a.valid(sessionReq(tok, ip)) {
+			t.Fatalf("active session expired after %d steps", i+1)
+		}
+	}
+	// ...12 h of silence ends it.
+	now = now.Add(sessionIdle)
+	if a.valid(sessionReq(tok, ip)) {
+		t.Fatal("idle session accepted")
+	}
+	// The 7-day cap holds even with constant activity.
+	tok = a.newSession("10.0.0.5")
+	for elapsed := time.Duration(0); elapsed < sessionTTL-time.Hour; elapsed += time.Hour {
+		now = now.Add(time.Hour)
+		if !a.valid(sessionReq(tok, ip)) {
+			t.Fatalf("active session expired at %v", elapsed)
+		}
+	}
+	now = now.Add(2 * time.Hour)
+	if a.valid(sessionReq(tok, ip)) {
+		t.Fatal("session outlived sessionTTL")
+	}
+}
