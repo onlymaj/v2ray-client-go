@@ -52,9 +52,10 @@ type Client struct {
 
 // Options carries settings that are not part of the client config.
 type Options struct {
-	// AllowPrivate lets a client that came from a subscription use a server
-	// in a private range (config.Settings.AllowPrivateServers). Clients
-	// added by hand may always do so.
+	// AllowPrivate lets a client that came from a subscription or from
+	// pasted links (config.Client.Untrusted) use a server in a private
+	// range (config.Settings.AllowPrivateServers). Clients saved through
+	// the form may always do so.
 	AllowPrivate bool
 }
 
@@ -90,7 +91,7 @@ func Build(c config.Client, opts Options) (*Client, error) {
 		cfg:    c,
 		server: net.JoinHostPort(c.Address, strconv.Itoa(int(c.Port))),
 		tcp: net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second,
-			Control: serverGuard(c.SubscriptionID != "" && !opts.AllowPrivate)},
+			Control: serverGuard((c.SubscriptionID != "" || c.Untrusted) && !opts.AllowPrivate)},
 	}
 	sni := c.SNI
 	if sni == "" {
@@ -161,10 +162,13 @@ func Build(c config.Client, opts Options) (*Client, error) {
 	case "vless":
 		ps, _ = json.Marshal(map[string]any{"id": c.UUID, "flow": c.Flow})
 	case "vmess":
-		// Inside TLS/REALITY the chunk nonce may wrap as in Xray: the outer
-		// AEAD protects the stream (see vmess.Settings.AllowNonceWrap).
+		// Inside verified TLS or REALITY the chunk nonce may wrap as in
+		// Xray: the outer AEAD protects the stream (see
+		// vmess.Settings.AllowNonceWrap). TLS with allowInsecure does not
+		// count: an on-path attacker could terminate it.
+		wrapOK := c.TLS == "reality" || c.TLS == "tls" && !c.AllowInsecure
 		ps, _ = json.Marshal(map[string]any{"id": c.UUID, "security": c.Security,
-			"allowNonceWrap": cl.security != nil})
+			"allowNonceWrap": wrapOK})
 	default:
 		return nil, wrap(c, errors.New("unknown protocol "+c.Protocol))
 	}

@@ -84,18 +84,18 @@ export function Settings() {
       <Card>
         <CardHeader className="items-start">
           <div className="flex flex-col gap-1">
-            <CardTitle>Allow subscription servers on private/LAN addresses</CardTitle>
+            <CardTitle>Allow untrusted servers on private/LAN addresses</CardTitle>
             <CardDescription>
-              Off by default. When on, clients from a subscription may use private and CGNAT server addresses, so a
-              malicious subscription can make the container connect to devices on your LAN. Clients you add by hand
-              may always use them.
+              Off by default. When on, untrusted clients (from a subscription or imported links) may use private and
+              CGNAT server addresses, so a malicious link can make the container connect to devices on your LAN.
+              Clients you add or save in the editor may always use them.
             </CardDescription>
           </div>
           <CardAction>
             <Switch
               checked={!!s.allowPrivateServers}
               onCheckedChange={(v) => setS({ ...s, allowPrivateServers: v })}
-              aria-label="Allow subscription servers on private/LAN addresses"
+              aria-label="Allow untrusted servers on private/LAN addresses"
             />
           </CardAction>
         </CardHeader>

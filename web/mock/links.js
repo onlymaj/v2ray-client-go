@@ -49,7 +49,7 @@ function parseVless(line) {
     sni: q.get('sni') || '',
     fingerprint: q.get('fp') || 'chrome',
     alpn: (q.get('alpn') || '').split(',').filter(Boolean),
-    allowInsecure: q.get('allowInsecure') === '1',
+    allowInsecure: false, // never taken from a link (see API.md)
     publicKey: q.get('pbk') || '',
     shortId: q.get('sid') || '',
     spiderX: q.get('spx') || '',
@@ -126,7 +126,6 @@ export function buildLink(c) {
   }
   if (c.tls === 'tls') {
     set('alpn', c.alpn.join(','));
-    if (c.allowInsecure) q.set('allowInsecure', '1');
   }
   if (c.tls === 'reality') {
     set('pbk', c.publicKey);

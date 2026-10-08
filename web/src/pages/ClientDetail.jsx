@@ -10,7 +10,7 @@ import { Card, CardAction, CardDescription, CardHeader, CardTitle } from '../com
 import { Switch } from '../components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { fmtRate, fmtMs, fmtAgo, fmtBytes } from '../util.js';
-import { transport } from './Clients.jsx';
+import { transport, TrustBadges, untrustedHint } from './Clients.jsx';
 import { Stat } from './Dashboard.jsx';
 
 const delaySeries = [{ label: 'Delay', color: '--info' }];
@@ -70,6 +70,13 @@ export function ClientDetail({ id }) {
         <Stat label="Upload" value={fmtRate(r.upRate)} className="text-warning" />
       </div>
 
+      {c.tls === 'tls' && c.allowInsecure && (
+        <Alert variant="destructive"><b>Certificate verification is off.</b> Anyone on the network path can intercept this connection and read the traffic. Turn off "Allow insecure" in the editor unless you trust every network in between.</Alert>
+      )}
+      {c.untrusted && (
+        <Alert><b>Untrusted.</b> {untrustedHint(c)}</Alert>
+      )}
+
       {c.status.lastError && st !== 'up' && (
         <Alert variant="destructive"><b>Last error:</b> <span className="font-mono text-xs">{c.status.lastError}</span></Alert>
       )}
@@ -95,7 +102,7 @@ export function ClientDetail({ id }) {
         <Card>
           <CardHeader><CardTitle>Details</CardTitle></CardHeader>
           <dl className="m-0 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-[13px] [&_dd]:m-0 [&_dd]:min-w-0 [&_dd]:[overflow-wrap:anywhere] [&_dt]:text-muted-foreground">
-            <dt>Transport</dt><dd><Badge>{transport(c)}</Badge></dd>
+            <dt>Transport</dt><dd className="flex flex-wrap gap-1"><Badge>{transport(c)}</Badge><TrustBadges c={c} /></dd>
             <dt>Server</dt><dd className="font-mono text-xs">{c.address}:{c.port}</dd>
             {c.sni && <><dt>SNI</dt><dd className="font-mono text-xs">{c.sni}</dd></>}
             <dt>Last success</dt><dd>{fmtAgo(c.status.lastSuccess)}</dd>

@@ -14,6 +14,21 @@ import { fmtRate, fmtMs } from '../util.js';
 /** Short transport description, e.g. "vless · ws · tls". */
 export const transport = (c) => [c.protocol, c.network, c.tls !== 'none' && c.tls, c.flow && 'vision'].filter(Boolean).join(' · ');
 
+const INSECURE_HINT = 'Certificate verification is off: anyone on the network path can intercept this connection and read the traffic.';
+/** Why an untrusted client is restricted and how to lift it. */
+export const untrustedHint = (c) =>
+  c.subscriptionId
+    ? 'From a subscription: private/LAN server addresses are blocked unless "Allow untrusted servers on private/LAN addresses" is on in Settings.'
+    : 'Imported from a link: private/LAN server addresses are blocked. Save the client in the editor to trust it.';
+
+/** "insecure" and "untrusted" badges, with an explanation on hover. */
+export const TrustBadges = ({ c }) => (
+  <>
+    {c.tls === 'tls' && c.allowInsecure && <Badge variant="destructive" title={INSECURE_HINT}>insecure</Badge>}
+    {c.untrusted && <Badge variant="outline" title={untrustedHint(c)}>untrusted</Badge>}
+  </>
+);
+
 /** Patches a client list from ping/status SSE events. */
 export function useClientStatus(setClients) {
   useLiveEvents(
@@ -77,7 +92,7 @@ export function Clients() {
                         <div className="truncate pl-[18px] text-xs font-normal text-destructive" title={c.status.lastError}>{c.status.lastError}</div>
                       )}
                     </TableCell>
-                    <TableCell className="cell-wide"><Badge>{transport(c)}</Badge></TableCell>
+                    <TableCell className="cell-wide"><div className="flex flex-wrap gap-1"><Badge>{transport(c)}</Badge><TrustBadges c={c} /></div></TableCell>
                     <TableCell data-label="Latency" className="text-right whitespace-nowrap">{st === 'up' ? fmtMs(c.status.delayMs) : '-'}</TableCell>
                     <TableCell data-label="Down" className="text-right whitespace-nowrap text-success">{fmtRate(r.downRate)}</TableCell>
                     <TableCell data-label="Up" className="text-right whitespace-nowrap text-warning">{fmtRate(r.upRate)}</TableCell>

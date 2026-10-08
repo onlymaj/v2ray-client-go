@@ -97,6 +97,7 @@ func (s *server) createClient(w http.ResponseWriter, r *http.Request) {
 	}
 	c.ID = config.NewID()
 	c.SubscriptionID = ""
+	c.Untrusted = false // saved through the form: the admin vouches for it
 	if err := validateClient(&c); err != nil {
 		writeError(w, err)
 		return
@@ -122,6 +123,7 @@ func (s *server) putClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.ID = id
+	c.Untrusted = false // saved through the form: the admin vouches for it
 	if err := validateClient(&c); err != nil {
 		writeError(w, err)
 		return
@@ -204,8 +206,8 @@ func (s *server) clientLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"link": link})
 }
 
-// importLinks adds every parsed link as a new enabled client and appends it
-// to the "default" group, if that group exists. Links whose
+// importLinks adds every parsed link as a new enabled, untrusted client and
+// appends it to the "default" group, if that group exists. Links whose
 // (protocol, address, port, uuid) already exist are counted as skipped, as
 // are unsupported schemes.
 func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +233,7 @@ func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, sc := range res.Clients {
 			c := config.FromShare(sc)
+			c.Untrusted = true // pasted links are as untrusted as subscriptions
 			if seen[dupKey(c)] {
 				skipped++
 				continue

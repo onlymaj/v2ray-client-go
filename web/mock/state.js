@@ -22,9 +22,9 @@ const seedClients = [
   { ...blankClient(), name: 'FI WS CDN', protocol: 'vless', address: 'cdn.fastnode.ir', port: 443, network: 'ws',
     tls: 'tls', sni: 'fi.fastnode.ir', host: 'fi.fastnode.ir', path: '/ws?ed=2048', alpn: ['h2', 'http/1.1'] },
   { ...blankClient(), name: 'TR gRPC', protocol: 'vless', address: '185.231.59.12', port: 2053, network: 'grpc',
-    tls: 'tls', sni: 'tr.example.net', serviceName: 'GunService', fingerprint: 'firefox' },
+    tls: 'tls', sni: 'tr.example.net', serviceName: 'GunService', fingerprint: 'firefox', allowInsecure: true },
   { ...blankClient(), name: 'AM VMess WS', protocol: 'vmess', address: '217.76.14.90', port: 8443, network: 'ws',
-    security: 'auto', tls: 'tls', sni: 'am.relaybox.org', host: 'am.relaybox.org', path: '/vm' },
+    security: 'auto', tls: 'tls', sni: 'am.relaybox.org', host: 'am.relaybox.org', path: '/vm', untrusted: true },
   { ...blankClient(), name: 'FR VMess plain', protocol: 'vmess', address: '51.38.112.4', port: 8080, network: 'ws',
     security: 'aes-128-gcm', path: '/', host: '' },
   reality({ name: 'UAE Reality', address: '5.182.36.201', sni: 'www.apple.com', fingerprint: 'safari' }),
@@ -106,7 +106,7 @@ db.subscriptions = [
 ];
 for (const n of ['FastNode SE', 'FastNode PL']) {
   addClient({ name: n, address: `${n.slice(-2).toLowerCase()}.fastnode.ir`, protocol: 'vless', network: 'ws', tls: 'tls',
-    sni: `${n.slice(-2).toLowerCase()}.fastnode.ir`, path: '/ws', subscriptionId: 's1' });
+    sni: `${n.slice(-2).toLowerCase()}.fastnode.ir`, path: '/ws', subscriptionId: 's1', untrusted: true });
 }
 db.subscriptions[0].count = 2;
 
@@ -125,7 +125,7 @@ export function refreshSubscription(s) {
       const cc = pick(['SE', 'PL', 'DE', 'GB', 'CA']);
       addClient({ name: `${s.name} ${cc}-${i + 1}`, address: `${cc.toLowerCase()}${i}.${new URL(s.url).hostname}`,
         protocol: 'vless', network: pick(['ws', 'grpc']), tls: 'tls', sni: new URL(s.url).hostname,
-        path: '/ws', serviceName: 'grpc', subscriptionId: s.id });
+        path: '/ws', serviceName: 'grpc', subscriptionId: s.id, untrusted: true });
     }
   }
   s.count = db.clients.filter((c) => c.subscriptionId === s.id).length;

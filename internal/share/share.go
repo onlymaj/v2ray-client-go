@@ -29,10 +29,13 @@ type Client struct {
 	Network string `json:"network"` // "tcp" | "ws" | "grpc"
 	TLS     string `json:"tls"`     // "none" | "tls" | "reality"
 
-	SNI           string   `json:"sni,omitempty"`
-	Fingerprint   string   `json:"fingerprint,omitempty"`
-	ALPN          []string `json:"alpn,omitempty"`
-	AllowInsecure bool     `json:"allowInsecure,omitempty"`
+	SNI         string   `json:"sni,omitempty"`
+	Fingerprint string   `json:"fingerprint,omitempty"`
+	ALPN        []string `json:"alpn,omitempty"`
+	// AllowInsecure is never read from or written to a link: a link author
+	// could otherwise turn off certificate checks unnoticed (Xray dropped
+	// allowInsecure too). Only the admin can set it on a client.
+	AllowInsecure bool `json:"allowInsecure,omitempty"`
 
 	PublicKey string `json:"publicKey,omitempty"` // reality
 	ShortID   string `json:"shortId,omitempty"`   // reality
@@ -175,7 +178,6 @@ func ParseVLESS(link string) (Client, error) {
 	if c.Port, err = parsePort(u.Port()); err != nil {
 		return Client{}, err
 	}
-	c.AllowInsecure = isTrue(q.Get("allowInsecure")) || isTrue(q.Get("insecure"))
 	switch c.Network {
 	case "ws":
 		c.Path, c.Host = q.Get("path"), q.Get("host")
@@ -208,9 +210,6 @@ func (c Client) VLESSLink() (string, error) {
 	set("sni", c.SNI)
 	set("fp", c.Fingerprint)
 	set("alpn", strings.Join(c.ALPN, ","))
-	if c.AllowInsecure {
-		q.Set("allowInsecure", "1")
-	}
 	set("pbk", c.PublicKey)
 	set("sid", c.ShortID)
 	set("spx", c.SpiderX)
@@ -479,8 +478,6 @@ func splitList(s string) []string {
 	}
 	return out
 }
-
-func isTrue(s string) bool { return s == "1" || strings.EqualFold(s, "true") }
 
 func def(s, d string) string {
 	if s == "" {

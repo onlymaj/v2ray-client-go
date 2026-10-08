@@ -41,7 +41,7 @@ The mock accepts the password `admin`.
   "sni": "www.microsoft.com",
   "fingerprint": "chrome",      // "chrome" | "firefox" | "safari" | "random"
   "alpn": ["h2", "http/1.1"],   // tls only
-  "allowInsecure": false,       // tls only
+  "allowInsecure": false,       // tls only; never taken from share links or subscriptions
   "publicKey": "...",           // reality: required
   "shortId": "6f42d83d",        // reality: hex, 0-16 chars
   "spiderX": "/",               // reality
@@ -51,6 +51,7 @@ The mock accepts the password `admin`.
   "multiMode": false,           // grpc
   "authority": "",              // grpc
   "subscriptionId": "s1",       // optional; set when a subscription created the client
+  "untrusted": true,            // read-only; omitted = false. See below.
   "status": {                   // read-only
     "state": "up",              // "up" | "down" | "unknown" | "disabled"
     "tcpMs": 63,                // null when unknown or down
@@ -74,6 +75,10 @@ The mock accepts the password `admin`.
 | POST | `/api/clients/:id/check` | — | `202`. Starts a health check now. The result arrives as a `ping` event (and a `status` event if the state changes). |
 | GET | `/api/clients/:id/link` | — | `{"link": "vless://..."}` (or `vmess://` base64 JSON) |
 
+`untrusted` is true for clients created by `POST /api/import` or by a subscription. Like subscription clients, they may not use private/CGNAT server addresses unless `settings.allowPrivateServers` is on. `POST /api/clients` and `PUT /api/clients/:id` (the editor) always store `untrusted: false`: saving a client is the admin vouching for it. A subscription client stays restricted through its `subscriptionId`, and every refresh sets `untrusted` back to true.
+
+`allowInsecure` turns off TLS certificate verification, so an on-path attacker can read the traffic. Share links cannot set it: the server ignores `allowInsecure`/`insecure` in links and never writes it into exported links. Subscription refreshes always reset it to false. Only the editor can turn it on. VMess allows its chunk nonce to wrap only inside REALITY or TLS with `allowInsecure` off.
+
 The server validates these fields: `name` and `address` must not be empty. `port` must be 1–65535. `uuid` must be a UUID. The enum fields must have one of the values listed above. `reality` requires `vless` and a `publicKey`.
 
 ## Import and subscriptions
@@ -82,6 +87,7 @@ The server validates these fields: `name` and `address` must not be empty. `port
 
 - `text` contains one `vless://` or `vmess://` link per line. The server ignores blank lines and lines that start with `#`. If the whole text is base64, the server decodes it first. This is the usual subscription body format.
 - `line` is 1-based. `text` is the offending line, truncated to 80 characters.
+- Imported clients are `untrusted` and have `allowInsecure` false.
 - `skipped` counts links that are already present (same address, port and uuid).
 
 Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
@@ -131,7 +137,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
   "healthInterval": 30,          // seconds, 5-3600
   "killSwitch": "block",         // "block" | "direct"
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client
-  "allowPrivateServers": false,  // let subscription clients use private/CGNAT server addresses; omitted = false
+  "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",
                 "password": "", "passwordSet": true, "addressList": "no-proxy",
                 "certSha256": "" }   // hex SHA-256 of the router's certificate (colons allowed); "" = not verified
@@ -140,7 +146,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 
 `GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to `ports.ui` can take effect only after a restart. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`.
 
-`allowPrivateServers` is off by default. While it is off, clients that came from a subscription may not use private (RFC 1918, ULA) or CGNAT server addresses, so a malicious subscription cannot aim health checks and connections at LAN devices. Clients added by hand (`POST /api/clients`, `/api/import`) may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
+`allowPrivateServers` is off by default. While it is off, untrusted clients (from a subscription or `/api/import`) may not use private (RFC 1918, ULA) or CGNAT server addresses, so a malicious subscription or pasted link cannot aim health checks and connections at LAN devices. Clients saved through `POST /api/clients` or `PUT /api/clients/:id` that have no `subscriptionId` may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
 
 **`routeros.password` is write-only:**
 

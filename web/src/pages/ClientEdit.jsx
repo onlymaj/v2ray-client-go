@@ -68,7 +68,10 @@ export function ClientEdit({ id }) {
   return (
     <form onSubmit={save} className="flex flex-col gap-6">
       <PageHead title={id ? `Edit ${c.name || 'client'}` : 'Add client'} back={id ? `#/clients/${id}` : '#/clients'} />
-      {c.subscriptionId && <Alert>This client comes from a subscription. A subscription refresh may overwrite your changes.</Alert>}
+      {c.subscriptionId && <Alert>This client comes from a subscription. A subscription refresh may overwrite your changes, and always turns "Allow insecure" off.</Alert>}
+      {c.untrusted && !c.subscriptionId && (
+        <Alert>This client was imported from a link. Saving it trusts it: its server may then be a private/LAN address. Check the address first.</Alert>
+      )}
 
       <Card>
         <CardHeader><CardTitle>General</CardTitle></CardHeader>
@@ -137,7 +140,7 @@ export function ClientEdit({ id }) {
               <Field label="ALPN" hint="Comma separated, e.g. h2,http/1.1">
                 <Input value={c.alpn.join(',')} onInput={(e) => set('alpn')(e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))} />
               </Field>
-              <SwitchField label="Allow insecure" hint="Skip certificate verification" checked={c.allowInsecure} onChange={set('allowInsecure')} />
+              <SwitchField label="Allow insecure" hint="Skips certificate verification: anyone on the network path can intercept the connection and read the traffic. Links and subscriptions never set this." checked={c.allowInsecure} onChange={set('allowInsecure')} />
             </>
           )}
           {c.tls === 'reality' && (

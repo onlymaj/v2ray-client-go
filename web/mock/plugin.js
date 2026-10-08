@@ -100,14 +100,14 @@ export function mockApi() {
 
         ['GET', /^\/clients$/, () => db.clients],
         ['POST', /^\/clients$/, (_m, b) => {
-          const c = { ...blankClient(), ...pickClientFields(b) };
+          const c = { ...blankClient(), ...pickClientFields(b), untrusted: false };
           validateClient(c);
           return [201, S.addClient(c)];
         }],
         ['GET', /^\/clients\/([^/]+)$/, ([, id]) => findOr404(db.clients, id, 'client')],
         ['PUT', /^\/clients\/([^/]+)$/, ([, id], b) => {
           const c = findOr404(db.clients, id, 'client');
-          const next = { ...c, ...pickClientFields(b) };
+          const next = { ...c, ...pickClientFields(b), untrusted: false };
           validateClient(next);
           const enabledChanged = next.enabled !== c.enabled;
           Object.assign(c, next, { id });
@@ -180,7 +180,7 @@ export function mockApi() {
           splitLinks(String(b.text || '')).forEach((text, i) => {
             if (!text || text.startsWith('#')) return;
             try {
-              const c = parseLink(text);
+              const c = { ...parseLink(text), untrusted: true };
               if (db.clients.some((x) => x.address === c.address && x.port === c.port && x.uuid === c.uuid)) {
                 skipped++;
                 return;

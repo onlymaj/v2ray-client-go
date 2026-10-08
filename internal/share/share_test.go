@@ -42,7 +42,7 @@ func TestParse(t *testing.T) {
 		{vlessGRPC, Client{
 			Name: "grpc 6", Protocol: "vless", Address: "2001:db8::1", Port: 2053,
 			ID: "b831381d-6324-4d53-ad4f-8cda48b30811", Encryption: "none", Network: "grpc", TLS: "tls",
-			SNI: "grpc.example.com", AllowInsecure: true, ServiceName: "gsvc", MultiMode: true,
+			SNI: "grpc.example.com", ServiceName: "gsvc", MultiMode: true,
 		}},
 		{vmessWS, Client{
 			Name: "VMess WS", Protocol: "vmess", Address: "vm.example.com", Port: 443,
@@ -141,5 +141,27 @@ func TestDecodeSubscription(t *testing.T) {
 		if len(r.Clients) != 2 || r.Skipped != 1 || len(r.Errors) != 0 {
 			t.Errorf("%s: got %d clients, %d skipped, errors %+v", name, len(r.Clients), r.Skipped, r.Errors)
 		}
+	}
+}
+
+// A link must not be able to turn off certificate verification.
+func TestInsecureParamsIgnored(t *testing.T) {
+	for _, q := range []string{"allowInsecure=1", "insecure=1", "allowInsecure=true"} {
+		c, err := Parse("vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.example:443?security=tls&" + q + "#x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.AllowInsecure {
+			t.Errorf("%s: AllowInsecure set from link", q)
+		}
+	}
+	c, _ := Parse(vlessWS)
+	c.AllowInsecure = true
+	link, err := c.Link()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(link, "nsecure") {
+		t.Errorf("export carries allowInsecure: %s", link)
 	}
 }

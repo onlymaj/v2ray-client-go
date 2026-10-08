@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/netip"
 	"os"
@@ -50,8 +51,8 @@ func TestServerGuard(t *testing.T) {
 }
 
 // A subscription client pointing at a private server is refused on every
-// dial path (DialServer, Probe, Dial) unless AllowPrivate is set; a client
-// added by hand is not.
+// dial path (DialServer, Probe, Dial) unless AllowPrivate is set, and so is
+// an untrusted (imported) one; a client saved through the form is not.
 func TestBuildRefusesPrivateSubscriptionServer(t *testing.T) {
 	fakeProtocol(t, "vless")
 	old := refusedServer
@@ -80,6 +81,10 @@ func TestBuildRefusesPrivateSubscriptionServer(t *testing.T) {
 		c := base()
 		c.Address, c.Port, c.TLS = "127.0.0.1", uint16(ln.Addr().(*net.TCPAddr).Port), "none"
 		c.SubscriptionID = sub
+		// "untrusted" stands for a client imported from pasted links.
+		if sub == "untrusted" {
+			c.SubscriptionID, c.Untrusted = "", true
+		}
 		return c
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -89,7 +94,8 @@ func TestBuildRefusesPrivateSubscriptionServer(t *testing.T) {
 		sub     string
 		allow   bool
 		refused bool
-	}{{"s1", false, true}, {"s1", true, false}, {"", false, false}} {
+	}{{"s1", false, true}, {"s1", true, false}, {"", false, false},
+		{"untrusted", false, true}, {"untrusted", true, false}} {
 		cl, err := Build(mk(tc.sub), Options{AllowPrivate: tc.allow})
 		if err != nil {
 			t.Fatal(err)
@@ -103,6 +109,39 @@ func TestBuildRefusesPrivateSubscriptionServer(t *testing.T) {
 			if got != tc.refused {
 				t.Errorf("sub=%q allow=%v path %d: err %v, want refused=%v", tc.sub, tc.allow, i, err, tc.refused)
 			}
+		}
+	}
+}
+
+// VMess may let its chunk nonce wrap only inside REALITY or verified TLS.
+func TestVMessNonceWrapNeedsVerifiedTLS(t *testing.T) {
+	fakeLayers(t, "tls", "reality")
+	var got map[string]any
+	orig, origErr := outbound.Lookup("vmess")
+	outbound.Register("vmess", func(s []byte, d func(ctx context.Context) (net.Conn, error)) (outbound.Dialer, error) {
+		got = nil
+		json.Unmarshal(s, &got)
+		return &echoProto{dial: d}, nil
+	})
+	t.Cleanup(func() {
+		if origErr == nil {
+			outbound.Register("vmess", orig)
+		}
+	})
+	for _, tc := range []struct {
+		tls      string
+		insecure bool
+		want     bool
+	}{{"none", false, false}, {"tls", false, true}, {"tls", true, false}, {"reality", false, true}} {
+		c := base()
+		c.Protocol, c.TLS, c.AllowInsecure, c.PublicKey = "vmess", tc.tls, tc.insecure, "k"
+		cl, err := Build(c, Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cl.Close()
+		if got["allowNonceWrap"] != tc.want {
+			t.Errorf("tls=%s insecure=%v: allowNonceWrap %v, want %v", tc.tls, tc.insecure, got["allowNonceWrap"], tc.want)
 		}
 	}
 }

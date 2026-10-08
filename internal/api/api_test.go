@@ -543,3 +543,54 @@ func TestSSE(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// Pasted links and subscriptions create untrusted clients without
+// allowInsecure; saving through the form (POST/PUT) trusts the client.
+func TestClientTrust(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	insecure := link(t, "one", "a.example", 443, u1) + "&allowInsecure=1"
+	var res struct {
+		Added []clientView `json:"added"`
+	}
+	e.expect("POST", "/api/import", map[string]string{"text": insecure}, 200, &res)
+	if len(res.Added) != 1 || !res.Added[0].Untrusted || res.Added[0].AllowInsecure {
+		t.Fatalf("import: %+v", res.Added)
+	}
+
+	in := map[string]any{"name": "A", "enabled": true, "protocol": "vless", "address": "a.example",
+		"port": 443, "uuid": u2, "network": "tcp", "tls": "tls", "untrusted": true}
+	var c clientView
+	e.expect("POST", "/api/clients", in, 201, &c)
+	if c.Untrusted {
+		t.Fatal("POST kept untrusted")
+	}
+	e.expect("PUT", "/api/clients/"+res.Added[0].ID, in, 200, &c)
+	if c.Untrusted || e.store.Get().Client(res.Added[0].ID).Untrusted {
+		t.Fatal("PUT kept untrusted")
+	}
+
+	const url = "https://sub.example/s"
+	e.setSub(url, base64.StdEncoding.EncodeToString([]byte(link(t, "s", "s.example", 443, u3)+"&allowInsecure=1")))
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"name": "S", "url": url}, 201, &sub)
+	var sid string
+	for _, cl := range e.store.Get().Clients {
+		if cl.SubscriptionID == sub.ID {
+			sid = cl.ID
+			if !cl.Untrusted || cl.AllowInsecure {
+				t.Fatalf("subscription client: %+v", cl)
+			}
+		}
+	}
+	// An admin may trust it and allow insecure; a refresh takes both back.
+	in["uuid"], in["address"], in["allowInsecure"] = u3, "s.example", true
+	e.expect("PUT", "/api/clients/"+sid, in, 200, nil)
+	e.setSub(url, base64.StdEncoding.EncodeToString([]byte(link(t, "s", "s.example", 443, u3))))
+	e.expect("POST", "/api/subscriptions/"+sub.ID+"/refresh", nil, 200, nil)
+	for _, cl := range e.store.Get().Clients {
+		if cl.SubscriptionID == sub.ID && (!cl.Untrusted || cl.AllowInsecure) {
+			t.Fatalf("after refresh: %+v", cl)
+		}
+	}
+}

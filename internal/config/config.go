@@ -116,10 +116,10 @@ type Settings struct {
 	HealthInterval int    `json:"healthInterval"` // seconds
 	KillSwitch     string `json:"killSwitch"`     // "block" | "direct"
 	DNSUpstream    string `json:"dnsUpstream"`    // ip:port queried over TCP through the proxy
-	// AllowPrivateServers lets clients that came from a subscription use
-	// private/CGNAT server addresses. Off by default: a subscription could
-	// otherwise point health checks at LAN devices. Manually added clients
-	// may always use them; loopback, link-local, the container and its
+	// AllowPrivateServers lets untrusted clients (from a subscription or
+	// pasted share links) use private/CGNAT server addresses. Off by
+	// default: such a link could otherwise point health checks at LAN
+	// devices. Clients saved through the form may always use them; loopback, link-local, the container and its
 	// gateway are always refused.
 	AllowPrivateServers bool     `json:"allowPrivateServers,omitempty"`
 	RouterOS            RouterOS `json:"routeros"`

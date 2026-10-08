@@ -202,6 +202,12 @@ func TestSameTransport(t *testing.T) {
 	if SameTransport(a, b) {
 		t.Fatal("ALPN change not detected")
 	}
+	// Untrusted decides the private-address guard: flipping it must rebuild.
+	a, b = base(), base()
+	b.Untrusted = true
+	if SameTransport(a, b) {
+		t.Fatal("Untrusted change not detected")
+	}
 }
 
 // Warm pooled conns that the server dropped are replaced transparently on

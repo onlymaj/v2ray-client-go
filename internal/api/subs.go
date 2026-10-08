@@ -159,6 +159,9 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		for _, sc := range res.Clients {
 			c := config.FromShare(sc)
 			c.SubscriptionID = id
+			// The provider never decides security exceptions: no
+			// allowInsecure, and private server addresses stay blocked.
+			c.Untrusted, c.AllowInsecure = true, false
 			k := matchKey(c)
 			if prev := old[k]; len(prev) > 0 {
 				c.ID, c.Enabled = prev[0].ID, prev[0].Enabled
