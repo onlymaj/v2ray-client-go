@@ -107,12 +107,18 @@ const (
 )
 
 type Settings struct {
-	Ports          Ports    `json:"ports"`
-	HealthURL      string   `json:"healthUrl"`
-	HealthInterval int      `json:"healthInterval"` // seconds
-	KillSwitch     string   `json:"killSwitch"`     // "block" | "direct"
-	DNSUpstream    string   `json:"dnsUpstream"`    // ip:port queried over TCP through the proxy
-	RouterOS       RouterOS `json:"routeros"`
+	Ports          Ports  `json:"ports"`
+	HealthURL      string `json:"healthUrl"`
+	HealthInterval int    `json:"healthInterval"` // seconds
+	KillSwitch     string `json:"killSwitch"`     // "block" | "direct"
+	DNSUpstream    string `json:"dnsUpstream"`    // ip:port queried over TCP through the proxy
+	// AllowPrivateServers lets clients that came from a subscription use
+	// private/CGNAT server addresses. Off by default: a subscription could
+	// otherwise point health checks at LAN devices. Manually added clients
+	// may always use them; loopback, link-local, the container and its
+	// gateway are always refused.
+	AllowPrivateServers bool     `json:"allowPrivateServers,omitempty"`
+	RouterOS            RouterOS `json:"routeros"`
 }
 
 // Config is the whole persisted document.
