@@ -296,6 +296,16 @@ func (d *Dispatcher) Dial(ctx context.Context, src netip.Addr, domain string, ds
 	return c, dec, err
 }
 
+// DialRouted routes by (src, routeDomain, dst.IP) but always connects to dst
+// itself. The DNS forwarder uses it: the query name selects the rule, while
+// the connection must go to the configured upstream resolver, never to
+// <qname>:53 (which would let any website answer DNS for the whole LAN).
+func (d *Dispatcher) DialRouted(ctx context.Context, src netip.Addr, routeDomain string, dst outbound.Addr) (net.Conn, Decision, error) {
+	dec := d.Route(src, routeDomain, dst.IP)
+	c, err := d.dial(ctx, dec, "", dst)
+	return c, dec, err
+}
+
 func (d *Dispatcher) dial(ctx context.Context, dec Decision, domain string, dst outbound.Addr) (net.Conn, error) {
 	switch dec.Kind {
 	case KindDirect:

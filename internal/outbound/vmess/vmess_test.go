@@ -328,7 +328,10 @@ func TestClientAgainstFakeServer(t *testing.T) {
 		{"zero", secNone, 0x00},
 	} {
 		t.Run(tc.security, func(t *testing.T) {
-			client, server := net.Pipe()
+			// A loopback TCP pair, not net.Pipe: the single-goroutine fake
+			// server reads before it writes, so an unbuffered pipe can
+			// deadlock the client's header flush against its Write.
+			client, server := tcpPair(t)
 			defer client.Close()
 			settings, _ := json.Marshal(Settings{ID: id, Security: tc.security})
 			d, err := newDialer(settings, func(context.Context) (net.Conn, error) { return client, nil })
@@ -402,4 +405,27 @@ func TestSettings(t *testing.T) {
 	if _, err := newDialer([]byte(`{"id":"short-name"}`), nop); err != nil {
 		t.Error("short id (UUIDv5 mapping) rejected:", err)
 	}
+}
+
+func tcpPair(t *testing.T) (net.Conn, net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	acc := make(chan net.Conn, 1)
+	go func() {
+		c, _ := ln.Accept()
+		acc <- c
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := <-acc
+	if server == nil {
+		t.Fatal("accept failed")
+	}
+	return client, server
 }

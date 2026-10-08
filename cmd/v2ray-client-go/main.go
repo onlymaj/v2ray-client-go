@@ -98,7 +98,8 @@ func run() error {
 	dnsSrv := dns.New(dns.Options{
 		Upstream: cfg.Settings.DNSUpstream,
 		Dial: func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, error) {
-			c, _, err := d.Dial(ctx, src, qname, dst)
+			// Route by the query name, but connect to the upstream itself.
+			c, _, err := d.DialRouted(ctx, src, qname, dst)
 			return c, err
 		},
 		// Cached answers and pooled upstream conns are shared only by queries
