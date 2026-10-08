@@ -242,11 +242,13 @@ export function mockApi() {
           const m = String(b.dnsUpstream || '').match(/^(\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\]):(\d{1,5})$/);
           if (!m || Number(m[2]) < 1 || Number(m[2]) > 65535) throw bad('dnsUpstream must be ip:port');
           const r = b.routeros || {};
+          if (r.certSha256 && !/^[0-9a-fA-F]{64}$/.test(String(r.certSha256).replace(/[: ]/g, ''))) throw bad('routeros.certSha256 must be 64 hex characters');
           const prev = db.settings.routeros;
           db.settings = {
             ports: p, healthUrl: b.healthUrl, healthInterval: iv, killSwitch: b.killSwitch, dnsUpstream: b.dnsUpstream,
+            allowPrivateServers: !!b.allowPrivateServers,
             routeros: { enabled: !!r.enabled, url: r.url || '', user: r.user || '', addressList: r.addressList || '',
-              password: r.password ? r.password : prev.password },
+              certSha256: r.certSha256 || '', password: r.password ? r.password : prev.password },
           };
           return publicSettings();
         }],

@@ -60,7 +60,21 @@ func (h *handler) exists(name string) bool {
 	return err == nil && !st.IsDir()
 }
 
+// csp allows only same-origin scripts (no inline scripts, no eval) and no
+// framing. Inline styles stay allowed: uPlot and Radix set style attributes.
+const csp = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+
+// setSecurityHeaders adds the headers sent with every UI response.
+func setSecurityHeaders(hd http.Header) {
+	hd.Set("Content-Security-Policy", csp)
+	hd.Set("X-Frame-Options", "DENY")
+	hd.Set("X-Content-Type-Options", "nosniff")
+	hd.Set("Referrer-Policy", "no-referrer")
+}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w.Header())
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

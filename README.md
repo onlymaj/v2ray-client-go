@@ -16,7 +16,7 @@ Router setup: **[docs/routeros.md](docs/routeros.md)**.
 - **Rules:** match on source CIDR, destination CIDR, or domain (exact or `*.wildcard`, using TLS SNI or HTTP Host sniffing). Each rule targets a client, a group, `direct` or `block`.
 - **Health checks** (TCP and real-delay), traffic stats with 24 h / 60 s history, and a live connection table.
 - **Share links and subscriptions:** import and export `vless://` / `vmess://` links and subscription URLs.
-- **RouterOS integration:** keeps the router's `no-proxy` address list in sync through the REST API, so direct traffic and proxy server addresses never pass through the container.
+- **RouterOS integration:** keeps the router's `no-proxy` address list (proxy server addresses and direct destinations) in sync through the REST API, so the router's own connections to the proxy servers do not loop through the container. The LAN rules deliberately do not use this list, because subscription data feeds it.
 - **Kill switch:** `block` (default) or `direct` when no client is available. It covers IPv4 TCP only.
 
 ### Out of scope
@@ -95,12 +95,13 @@ The container is configured with environment variables. Everything else is set i
 | `killSwitch` | `block` (or `direct`) |
 | `dnsUpstream` | `1.1.1.1:53`, queried over TCP through the proxy |
 | `routeros` | `url` `https://172.17.0.1`, `addressList` `no-proxy`, `certSha256` empty (no verification), disabled until configured |
+| `allowPrivateServers` | `false`: subscription clients may not use private/CGNAT server addresses (manually added clients may) |
 
 On first start, the config has an empty failover group called `default` and one default rule that points to it.
 
 ## API
 
-The UI is a client of a JSON HTTP API on the UI port. It covers CRUD for clients, groups, rules and subscriptions, settings, stats, the live connection table, and server-sent events for live updates. Authentication uses a session cookie (HttpOnly, SameSite=Strict). See [web/API.md](web/API.md) for the endpoints and payloads.
+The UI is a client of a JSON HTTP API on the UI port. It covers CRUD for clients, groups, rules and subscriptions, settings, stats, the live connection table, and server-sent events for live updates. Authentication uses a session cookie (HttpOnly, SameSite=Strict, bound to the client IP). The UI is served with a strict Content-Security-Policy (no inline scripts, no framing). See [web/API.md](web/API.md) for the endpoints and payloads.
 
 ## Architecture
 

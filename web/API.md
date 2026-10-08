@@ -131,12 +131,16 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
   "healthInterval": 30,          // seconds, 5-3600
   "killSwitch": "block",         // "block" | "direct"
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client
-  "routeros": { "enabled": true, "url": "http://192.168.88.1", "user": "v2ray",
-                "password": "", "passwordSet": true, "addressList": "v2ray-bypass" }
+  "allowPrivateServers": false,  // let subscription clients use private/CGNAT server addresses; omitted = false
+  "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",
+                "password": "", "passwordSet": true, "addressList": "no-proxy",
+                "certSha256": "" }   // hex SHA-256 of the router's certificate (colons allowed); "" = not verified
 }
 ```
 
 `GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to `ports.ui` can take effect only after a restart. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`.
+
+`allowPrivateServers` is off by default. While it is off, clients that came from a subscription may not use private (RFC 1918, ULA) or CGNAT server addresses, so a malicious subscription cannot aim health checks and connections at LAN devices. Clients added by hand (`POST /api/clients`, `/api/import`) may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
 
 **`routeros.password` is write-only:**
 
@@ -193,3 +197,4 @@ The server serves `web/dist` at `/`, with `index.html` as the fallback for `/`. 
 - `429` (with `Retry-After`) from `POST /api/login`: more than one login in flight per IP, more than 5 attempts per IP per minute, or more than 30 attempts per minute across all IPs.
 - `400` from `POST /api/import` with more than 1000 links; the config holds at most 1000 clients in total.
 - Changing `settings.routeros.url` or `user` without sending a new password clears the stored password.
+- Sessions are bound to the client IP that logged in (a request with the cookie from another IP gets `401`) and expire after 12 hours without use, or 7 days after login at the latest.

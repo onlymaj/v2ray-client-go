@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -85,5 +86,17 @@ func TestEmbeddedPlaceholder(t *testing.T) {
 	r := get(Handler(), "/", "")
 	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Fatalf("%d %v", r.StatusCode, r.Header)
+	}
+}
+
+func TestSecurityHeaders(t *testing.T) {
+	h := New(fstest.MapFS{"index.html": {Data: []byte("<html>")}})
+	for _, p := range []string{"/", "/clients/abc", "/assets/missing.js"} {
+		r := get(h, p, "")
+		if !strings.Contains(r.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
+			r.Header.Get("X-Frame-Options") != "DENY" || r.Header.Get("X-Content-Type-Options") != "nosniff" ||
+			r.Header.Get("Referrer-Policy") != "no-referrer" {
+			t.Fatalf("%s: %v", p, r.Header)
+		}
 	}
 }

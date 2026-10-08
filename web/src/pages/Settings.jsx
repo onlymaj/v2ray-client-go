@@ -84,6 +84,26 @@ export function Settings() {
       <Card>
         <CardHeader className="items-start">
           <div className="flex flex-col gap-1">
+            <CardTitle>Allow subscription servers on private/LAN addresses</CardTitle>
+            <CardDescription>
+              Off by default. When on, clients from a subscription may use private and CGNAT server addresses, so a
+              malicious subscription can make the container connect to devices on your LAN. Clients you add by hand
+              may always use them.
+            </CardDescription>
+          </div>
+          <CardAction>
+            <Switch
+              checked={!!s.allowPrivateServers}
+              onCheckedChange={(v) => setS({ ...s, allowPrivateServers: v })}
+              aria-label="Allow subscription servers on private/LAN addresses"
+            />
+          </CardAction>
+        </CardHeader>
+      </Card>
+
+      <Card>
+        <CardHeader className="items-start">
+          <div className="flex flex-col gap-1">
             <CardTitle>RouterOS API</CardTitle>
             <CardDescription>Keeps an address list of proxy server IPs on the router so their traffic bypasses the container.</CardDescription>
           </div>
@@ -92,7 +112,7 @@ export function Settings() {
           </CardAction>
         </CardHeader>
         <fieldset className={grid + ' m-0 min-w-0 border-0 p-0 disabled:opacity-55'} disabled={!s.routeros.enabled}>
-          <Field label="URL" hint="e.g. http://192.168.88.1 (REST API)">
+          <Field label="URL" hint="e.g. https://172.17.0.1 (REST API)">
             <Input type="url" value={s.routeros.url} onInput={(e) => ros('url', e.currentTarget.value)} required={s.routeros.enabled} />
           </Field>
           <Field label="User">
@@ -105,6 +125,16 @@ export function Settings() {
               value={s.routeros.password || ''}
               placeholder={s.routeros.passwordSet ? '(unchanged)' : ''}
               onInput={(e) => ros('password', e.currentTarget.value)}
+            />
+          </Field>
+          <Field label="Certificate SHA-256" hint="Pins the router's HTTPS certificate (64 hex characters). Empty: not verified">
+            <Input
+              className="font-mono text-xs"
+              autoComplete="off"
+              pattern="^([0-9a-fA-F]{2}:?){31}[0-9a-fA-F]{2}$"
+              title="SHA-256 fingerprint: 64 hex characters"
+              value={s.routeros.certSha256 || ''}
+              onInput={(e) => ros('certSha256', e.currentTarget.value)}
             />
           </Field>
           <Field label="Address list">

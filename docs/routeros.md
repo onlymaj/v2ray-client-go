@@ -8,10 +8,10 @@ The result looks like this:
 LAN hosts ──┐                                ┌─> proxy server (VLESS/VMess) ─> internet
             ├─ router ── br-containers ── veth-v2ray (172.17.0.2, container)
 router  ────┘   (mangle: mark-routing                │
- itself          to-v2ray → 172.17.0.2)             └─> direct (no-proxy, rules = direct)
+ itself          to-v2ray → 172.17.0.2)             └─> direct (rules = direct)
 ```
 
-- New LAN TCP connections that are not going to a private address or to the `no-proxy` address list get the routing mark `to-v2ray`. The router then sends them to the container instead of the WAN gateway.
+- New LAN TCP connections that are not going to the router or to a private/reserved address get the routing mark `to-v2ray`. The router then sends them to the container instead of the WAN gateway.
 - Inside its own network namespace, the container installs a nat `PREROUTING` REDIRECT, either through nf_tables over netlink or through legacy x_tables setsockopt. No iptables binary is involved. The REDIRECT sends that TCP to the transparent port (12345). The app reads the original destination with `SO_ORIGINAL_DST` and forwards the connection through a proxy client, a group, directly, or not at all (block), depending on your rules.
 - The container's own outbound connections leave through `br-containers` without a routing mark, so they never loop back into it.
 
@@ -71,11 +71,13 @@ The defconf firewall drops input from anything that is not LAN. Allow the contai
 
 ```routeros
 /ip/firewall/filter
-add chain=input action=accept src-address=172.17.0.2 dst-address=172.17.0.1 protocol=udp dst-port=53 \
+add chain=input action=accept in-interface=br-containers src-address=172.17.0.2 dst-address=172.17.0.1 protocol=udp dst-port=53 \
     comment="v2ray-client: container -> router DNS" place-before=[find comment="defconf: drop all not coming from LAN"]
-add chain=input action=accept src-address=172.17.0.2 dst-address=172.17.0.1 protocol=tcp dst-port=53,443 \
+add chain=input action=accept in-interface=br-containers src-address=172.17.0.2 dst-address=172.17.0.1 protocol=tcp dst-port=53,443 \
     comment="v2ray-client: container -> router DNS/REST" place-before=[find comment="defconf: drop all not coming from LAN"]
 ```
+
+`in-interface=br-containers` matters: without it, a LAN host that forges the source address `172.17.0.2` also matches these rules.
 
 If your firewall is not defconf, put these rules above whatever rule drops input from non-LAN interfaces.
 
@@ -191,9 +193,11 @@ add list=v2ray-bypass address=240.0.0.0/4
 ```
 
 - `v2ray-bypass` is static and maintained by you. It holds private, CGNAT, multicast and reserved ranges, plus anything else that must never go through the proxy, such as the endpoints of VPN tunnels the router itself opens.
-- `no-proxy` belongs to the app (the setting `routeros.addressList`, default `no-proxy`). The app keeps it in sync through the REST API: proxy server addresses (after re-resolving hostnames) and destinations that your rules send `direct`. Keep your own entries in `v2ray-bypass` so a sync never removes them. If you do not enable REST sync, create `no-proxy` by hand and **at least add every proxy server IP to it**.
+- `no-proxy` belongs to the app (the setting `routeros.addressList`, default `no-proxy`). The app keeps it in sync through the REST API: proxy server addresses (after re-resolving hostnames) and destinations that your rules send `direct`. Keep your own entries in `v2ray-bypass` so a sync never removes them. If you do not enable REST sync and you route router-originated traffic (below), create `no-proxy` by hand and **at least add every proxy server IP to it**.
 
-Both lists act as an optimization and a safety net. Direct traffic does not need the round trip through the container, and the proxy servers' own addresses must not be routed into the container. (The container's connections are already excluded because they do not come from `LAN`, but router-originated health checks and similar traffic could still loop.)
+`v2ray-bypass` applies to LAN and router traffic. `no-proxy` applies **only to router-originated traffic** (the `output` chain): there it stops the router's connections to the proxy servers from looping back into the container. The container's own connections need no such exclusion, because they do not enter from `LAN`. (A malicious subscription can still make the router's own connections to an IP it lists go out directly. That affects only router-originated traffic.)
+
+**Do not use `no-proxy` in the LAN rules.** Its content comes partly from data the app does not control: server addresses in subscriptions. A malicious subscription could list any IP as a "server" and so make LAN traffic to that IP skip the container, its rules and the kill switch. LAN traffic that your rules send `direct` still goes through the container, which sends it out directly. That costs one extra hop on the router.
 
 ### Mangle: LAN traffic
 
@@ -206,11 +210,11 @@ add chain=prerouting action=mark-routing new-routing-mark=to-v2ray passthrough=n
 
 add chain=v2ray-new action=return dst-address-type=local       comment="v2ray-client: to the router itself"
 add chain=v2ray-new action=return dst-address-list=v2ray-bypass comment="v2ray-client: private/reserved"
-add chain=v2ray-new action=return dst-address-list=no-proxy     comment="v2ray-client: app-managed direct list"
 add chain=v2ray-new action=mark-connection new-connection-mark=v2ray passthrough=yes comment="v2ray-client: proxy this connection"
 ```
 
-- The exclusions run only for the **first packet** of a connection. The decision is stored as a connection mark, so later changes to `no-proxy` do not move live connections and break them halfway.
+- The exclusions run only for the **first packet** of a connection. The decision is stored as a connection mark, so later changes to the address lists do not move live connections and break them halfway.
+- There is deliberately no `no-proxy` exclusion here (see "Address lists" above). If you set up an older version of this guide, remove that rule: `/ip/firewall/mangle/remove [find chain=v2ray-new dst-address-list=no-proxy]`.
 - Only TCP is marked. The container proxies TCP only. UDP sent to it would be dropped (see "UDP" below).
 - The `lan` list is not used above, which keeps `in-interface-list=LAN`. If you prefer to match by source, replace `in-interface-list=LAN` with `src-address-list=lan` in both prerouting rules.
 
@@ -254,7 +258,7 @@ Browsers try HTTP/3 over UDP 443 first. UDP is not proxied, so QUIC would go out
     place-before=[find action=fasttrack-connection]
 ```
 
-To keep QUIC for direct destinations, add `dst-address-list=!no-proxy`. A `reject` is better than a `drop` here because browsers fall back immediately instead of waiting for a timeout.
+A `reject` is better than a `drop` here because browsers fall back immediately instead of waiting for a timeout.
 
 ### IPv6 (required)
 
@@ -333,7 +337,7 @@ If you enable it, give the app a dedicated user with as few rights as RouterOS a
 
 - Do **not** add the `api` policy. It opens the binary API (port 8728) to this user, which REST does not need. If your build has no `rest-api` policy, update RouterOS.
 - `address=172.17.0.2/32` on the user means the credentials work only from the container, even if they leak. Without `address=` on `www-ssl`, enabling it also opens WebFig over HTTPS to the whole LAN.
-- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3. The traffic never leaves the router, but the password crosses the veth in cleartext. Do not open `www` to the LAN for this purpose.
+- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3 (keep `in-interface=br-containers`). The traffic never leaves the router, but the password crosses the veth in cleartext. Do not open `www` to the LAN for this purpose.
 
 ### Pin the certificate (`certSha256`)
 
@@ -399,9 +403,17 @@ add chain=forward action=reject reject-with=tcp-reset dst-address=172.17.0.2 pro
     comment="v2ray-client: no other direct access to the container" place-before=[find action=fasttrack-connection]
 ```
 
+**Give each admin host a static DHCP lease** (`/ip/dhcp-server/lease/make-static [find address=192.168.88.10]`). The rules above trust the address. A login session is also bound to the client IP it logged in from, so a session cookie sniffed from the plaintext traffic cannot be replayed from another address. With a dynamic lease, the admin host can get a new address, which ends its session, and another device can later get the admin's old address.
+
 The second rule also blocks the SOCKS and HTTP ports if you enable them. Proxied traffic is not affected: it is routed to the container with its original destination address, not addressed to `172.17.0.2`. DNS (port 53) stays open for option A in section 8.
 
 The SOCKS5 and HTTP CONNECT inbounds are **off by default** (port 0). They have no authentication and can connect to any address, including the router's own services at `172.17.0.1`. A connection through them reaches the router with the container's address, which gets around the `address=172.17.0.2/32` limit on the REST user. Enable them (settings `ports.socks` / `ports.http`, then restart) only if you need them, and allow them only from trusted hosts with a forward rule like the one above.
+
+### Private server addresses (`allowPrivateServers`)
+
+By default, clients that came from a **subscription** may not use private (RFC 1918, ULA) or CGNAT server addresses. Otherwise a malicious subscription could make the container open health checks and connections to devices on your LAN. Clients you add by hand or import from share links may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
+
+If your subscription provider really serves from a private or CGNAT address (for example a server on your own LAN or behind a carrier NAT), turn on Settings → "Allow subscription servers on private/LAN addresses" (`settings.allowPrivateServers`). Turn it on only for subscriptions you trust.
 
 ## Troubleshooting
 

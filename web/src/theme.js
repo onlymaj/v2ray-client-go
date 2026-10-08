@@ -1,5 +1,5 @@
 // Theme preference: data-theme on <html>, remembered in
-// localStorage. index.html applies it before first paint.
+// localStorage. public/theme.js applies it before first paint.
 const KEY = 'v2ray-theme';
 const listeners = new Set();
 

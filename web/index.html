@@ -5,14 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>v2ray-client-go</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230f172a'/%3E%3Cpath d='M4.5 11.5v-7l7 7v-7' stroke='%23f8fafc' stroke-width='1.8' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-    <script>
-      (function () {
-        var t;
-        try { t = localStorage.getItem('v2ray-theme'); } catch (e) {}
-        if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-        document.documentElement.dataset.theme = t;
-      })();
-    </script>
+    <script src="/theme.js"></script>
   </head>
   <body>
     <div id="app"></div>

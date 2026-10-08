@@ -47,7 +47,8 @@ export const db = {
     healthInterval: 30,
     killSwitch: 'block',
     dnsUpstream: '1.1.1.1:53',
-    routeros: { enabled: true, url: 'http://192.168.88.1', user: 'v2ray', password: 'secret', addressList: 'v2ray-bypass' },
+    allowPrivateServers: false,
+    routeros: { enabled: true, url: 'http://192.168.88.1', user: 'v2ray', password: 'secret', addressList: 'v2ray-bypass', certSha256: '' },
   },
   sessions: new Set(),
 };
