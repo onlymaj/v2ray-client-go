@@ -22,9 +22,12 @@
 // over the limit is answered SERVFAIL, a connection over it is closed. TCP
 // clients must send each query within TCPIdleTimeout. UDP queries (cache
 // hits included) are rate limited per source to RatePerSource per second,
-// with bursts of 2.5 times that; queries over the rate get no reply, so a
-// spoofed source can't turn the server into a reflector. SourceLimit can
-// raise both limits for chosen sources.
+// with bursts of 2.5 times that. Every second query over the rate is
+// answered with header + question and TC set (never larger than the query),
+// the rest get no reply: a spoofed source can't turn the server into a
+// reflector, nor starve the real owner of that address, who retries over
+// TCP (not rate limited). SourceLimit can raise both limits for chosen
+// sources, or lift the rate limit.
 package dns
 
 import (
@@ -70,8 +73,10 @@ type Options struct {
 
 	// SourceLimit, if set, returns the limits for queries from src instead
 	// of MaxPerSource and RatePerSource (e.g. higher ones for a router that
-	// forwards every LAN query). A value <= 0 means the default. It is
-	// called for every query and must be fast.
+	// forwards every LAN query). Zero means the default; a negative
+	// maxInFlight also means the default, a negative ratePerSec means no
+	// UDP rate limit for src. It is called for every query and must be
+	// fast.
 	SourceLimit func(src netip.Addr) (maxInFlight, ratePerSec int)
 
 	Logf func(format string, args ...any)
@@ -136,7 +141,7 @@ func New(opts Options) *Server {
 	return s
 }
 
-// limits returns the in-flight cap and UDP rate for src.
+// limits returns the in-flight cap and UDP rate for src (< 0: unlimited).
 func (s *Server) limits(src netip.Addr) (maxInFlight, ratePerSec int) {
 	if s.opts.SourceLimit != nil {
 		maxInFlight, ratePerSec = s.opts.SourceLimit(src)
@@ -144,7 +149,7 @@ func (s *Server) limits(src netip.Addr) (maxInFlight, ratePerSec int) {
 	if maxInFlight <= 0 {
 		maxInFlight = s.opts.MaxPerSource
 	}
-	if ratePerSec <= 0 {
+	if ratePerSec == 0 {
 		ratePerSec = s.opts.RatePerSource
 	}
 	return maxInFlight, ratePerSec
@@ -260,8 +265,15 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 			continue
 		}
 		src := srcOf(from)
-		if _, rate := s.limits(src); !s.udpRate.allow(src, rate, time.Now()) {
+		_, rate := s.limits(src)
+		switch s.udpRate.take(src, rate, time.Now()) {
+		case rateDrop:
 			continue // over the rate: no reply, so nothing to reflect
+		case rateSlip:
+			if resp := slipResponse(buf[:n]); resp != nil {
+				pc.WriteTo(resp, from)
+			}
+			continue
 		}
 		select {
 		case handlers <- struct{}{}:
@@ -635,11 +647,25 @@ type rateLimiter struct {
 type bucket struct {
 	tokens float64
 	last   time.Time
+	over   uint // queries over the rate, for slipping every second one
 }
 
-// allow takes a token from ip's bucket, which refills at rate per second
-// up to a burst of 2.5*rate.
-func (r *rateLimiter) allow(ip netip.Addr, rate int, now time.Time) bool {
+// rateVerdict says what to do with a UDP query.
+type rateVerdict int
+
+const (
+	rateAllow rateVerdict = iota // answer it
+	rateSlip                     // over the rate: answer with TC set only
+	rateDrop                     // over the rate: no reply
+)
+
+// take takes a token from ip's bucket, which refills at rate per second
+// up to a burst of 2.5*rate. Every second query over the rate slips. A
+// negative rate means no limit.
+func (r *rateLimiter) take(ip netip.Addr, rate int, now time.Time) rateVerdict {
+	if rate < 0 {
+		return rateAllow
+	}
 	k := sourceKey(ip)
 	burst := float64(max(rate*5/2, 1))
 	r.mu.Lock()
@@ -656,10 +682,13 @@ func (r *rateLimiter) allow(ip netip.Addr, rate int, now time.Time) bool {
 	}
 	b.last = now
 	if b.tokens < 1 {
-		return false
+		if b.over++; b.over%2 == 0 {
+			return rateSlip
+		}
+		return rateDrop
 	}
 	b.tokens--
-	return true
+	return rateAllow
 }
 
 // evictLocked makes room for one bucket: idle buckets go first (swept at

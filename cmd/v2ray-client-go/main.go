@@ -119,7 +119,7 @@ func run() error {
 		// higher per-source budget than a single LAN device.
 		SourceLimit: func(src netip.Addr) (int, int) {
 			if netguard.Refused(src) {
-				return 256, 1000
+				return 256, -1 // no UDP rate limit; docs drop forged 172.17.0.0/24 sources
 			}
 			return 0, 0 // defaults
 		},

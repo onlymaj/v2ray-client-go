@@ -263,6 +263,17 @@ func truncate(resp []byte, limit int) []byte {
 	return out
 }
 
+// slipResponse answers a query over the rate limit: header + echoed
+// question with TC set, so the client retries over TCP. It is never longer
+// than query. Responses and malformed queries get nil (no reply).
+func slipResponse(query []byte) []byte {
+	h, _, err := parseQuestion(query)
+	if err != nil || h.Flags&flagQR != 0 {
+		return nil
+	}
+	return truncate(errorResponse(query, rcodeNoError), 0)
+}
+
 // errorResponse builds a header + echoed question reply with rcode.
 func errorResponse(query []byte, rcode int) []byte {
 	h, q, err := parseQuestion(query)

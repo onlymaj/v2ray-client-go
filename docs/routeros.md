@@ -79,6 +79,14 @@ add chain=input action=accept in-interface=br-containers src-address=172.17.0.2 
 
 `in-interface=br-containers` matters: without it, a LAN host that forges the source address `172.17.0.2` also matches these rules.
 
+**Required: drop forged container-subnet sources.** The container trusts the router address `172.17.0.1` more than a LAN device (for example, DNS queries from it are not rate-limited, because under DNS Option B every LAN query comes from the router). RouterOS does not filter forged source addresses by default (`rp-filter=no`), so drop anything that claims a `172.17.0.0/24` source but does not arrive on `br-containers`:
+
+```routeros
+/ip/firewall/raw
+add chain=prerouting action=drop src-address=172.17.0.0/24 in-interface=!br-containers \
+    comment="v2ray-client: drop forged container-subnet sources"
+```
+
 If your firewall is not defconf, put these rules above whatever rule drops input from non-LAN interfaces.
 
 ## 4. Storage: tmpdir, root-dir, /data mount

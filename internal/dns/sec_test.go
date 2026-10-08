@@ -195,8 +195,10 @@ func TestPerSourceTCPCap(t *testing.T) {
 }
 
 // udpReplies sends n copies of q from src to the server at addr and
-// counts the replies.
-func udpReplies(t *testing.T, src, addr string, q []byte, n int) int {
+// counts the full replies and the slipped (TC, header + question) ones,
+// which must not be longer than q.
+func udpReplies(t *testing.T, src, addr string, q []byte, n int) (full, tc int) {
+	t.Helper()
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		t.Fatal(err)
@@ -209,19 +211,33 @@ func udpReplies(t *testing.T, src, addr string, q []byte, n int) int {
 	for range n {
 		c.Write(q)
 	}
-	got := 0
 	buf := make([]byte, 65535)
 	for {
 		c.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-		if _, err := c.Read(buf); err != nil {
-			return got
+		m, err := c.Read(buf)
+		if err != nil {
+			return full, tc
 		}
-		got++
+		h, _ := parseHeader(buf[:m])
+		if h.Flags&flagTC == 0 {
+			full++
+			continue
+		}
+		tc++
+		if m > len(q) || h.ANCount != 0 || h.ARCount != 0 || h.Flags&flagQR == 0 {
+			t.Errorf("slip reply: %d bytes (query %d), header %+v", m, len(q), h)
+		}
 	}
 }
 
-// UDP replies, cache hits included, are rate limited per source; queries
-// over the rate get no reply. SourceLimit raises the rate for a source.
+// allow reports whether take lets the query through.
+func (r *rateLimiter) allow(ip netip.Addr, rate int, now time.Time) bool {
+	return r.take(ip, rate, now) == rateAllow
+}
+
+// UDP replies, cache hits included, are rate limited per source; every
+// second query over the rate gets a TC reply, the rest none. SourceLimit
+// raises the rate for a source.
 func TestUDPRateLimit(t *testing.T) {
 	up := newFakeUpstream(t)
 	router := netip.MustParseAddr("127.0.0.3")
@@ -237,19 +253,19 @@ func TestUDPRateLimit(t *testing.T) {
 	})
 	addr := startServer(t, s)
 	q := buildQuery(1, "a.example", typeA, 0)
-	if n := udpReplies(t, "127.0.0.1", addr, q, 1); n != 1 {
+	if n, _ := udpReplies(t, "127.0.0.1", addr, q, 1); n != 1 {
 		t.Fatalf("first query: %d replies", n)
 	}
-	if n := udpReplies(t, "127.0.0.1", addr, q, 20); n > 4 {
-		t.Fatalf("%d cached replies over the rate, want <= 4", n)
+	if n, tc := udpReplies(t, "127.0.0.1", addr, q, 20); n > 4 || tc < 6 || tc > 10 {
+		t.Fatalf("%d cached and %d TC replies over the rate, want <= 4 and ~8", n, tc)
 	}
 	if n := up.queries.Load(); n != 1 {
 		t.Fatalf("upstream queries %d, want 1 (the rest were cache hits)", n)
 	}
-	if n := udpReplies(t, "127.0.0.2", addr, q, 1); n != 1 {
+	if n, _ := udpReplies(t, "127.0.0.2", addr, q, 1); n != 1 {
 		t.Fatal("other source limited")
 	}
-	if n := udpReplies(t, router.String(), addr, q, 20); n != 20 {
+	if n, _ := udpReplies(t, router.String(), addr, q, 20); n != 20 {
 		t.Fatalf("SourceLimit source got %d of 20 replies", n)
 	}
 }
@@ -325,5 +341,100 @@ func TestSourceLimitInFlight(t *testing.T) {
 		if p.acquire(other) {
 			t.Fatal("other source over the default limit")
 		}
+	}
+}
+
+// A spoofer who drains a victim's bucket can't starve it: the victim still
+// gets TC replies and its query succeeds over TCP, which the UDP rate limit
+// doesn't cover.
+func TestSlipVictimFallsBackToTCP(t *testing.T) {
+	up := newFakeUpstream(t)
+	s := New(Options{
+		Upstream: up.ln.Addr().String(), Dial: directDial(&dialRecord{}),
+		RatePerSource: 1, // burst 2
+	})
+	addr := startServer(t, s)
+	q := buildQuery(7, "victim.example", typeA, 4096)
+	udpReplies(t, "127.0.0.1", addr, q, 50) // the spoofed flood
+	full, tc := udpReplies(t, "127.0.0.1", addr, q, 4)
+	if full != 0 || tc == 0 {
+		t.Fatalf("victim on a drained bucket: %d full, %d TC replies", full, tc)
+	}
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	if err := writeMsg(c, q); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := readMsg(c)
+	if err != nil {
+		t.Fatalf("TCP fallback: %v", err)
+	}
+	if h, _ := parseHeader(resp); h.Flags&flagTC != 0 || h.ANCount == 0 {
+		t.Fatalf("TCP fallback answer: %+v", h)
+	}
+}
+
+// A slip reply is header + question with QR and TC set, never longer than
+// the query; responses and malformed queries get none.
+func TestSlipResponse(t *testing.T) {
+	for _, q := range [][]byte{
+		buildQuery(1, "a.example", typeA, 0),
+		buildQuery(2, "a.example", typeA, 4096),
+		buildQuery(3, "a-much-longer-label.sub.example", 28, 1232),
+	} {
+		r := slipResponse(q)
+		h, err := parseHeader(r)
+		if err != nil || len(r) > len(q) || h.Flags&(flagQR|flagTC) != flagQR|flagTC ||
+			h.ID != binary.BigEndian.Uint16(q) || h.QDCount != 1 || h.ANCount+h.NSCount+h.ARCount != 0 {
+			t.Fatalf("slip for %d-byte query: %d bytes, %+v, %v", len(q), len(r), h, err)
+		}
+	}
+	resp := buildQuery(4, "a.example", typeA, 0)
+	binary.BigEndian.PutUint16(resp[2:], flagQR)
+	for _, m := range [][]byte{resp, make([]byte, headerLen), {1, 2, 3}} {
+		if r := slipResponse(m); r != nil {
+			t.Fatalf("slip reply to %x: %x", m, r)
+		}
+	}
+}
+
+// A negative rate from SourceLimit lifts the UDP rate limit for a source.
+func TestUnlimitedSource(t *testing.T) {
+	var r rateLimiter
+	r.b = map[netip.Addr]*bucket{}
+	now := time.Unix(1000, 0)
+	a := netip.MustParseAddr("192.168.88.1")
+	for i := range 10000 {
+		if v := r.take(a, -1, now); v != rateAllow {
+			t.Fatalf("unlimited source query %d: verdict %d", i, v)
+		}
+	}
+	if len(r.b) != 0 {
+		t.Fatal("unlimited source got a bucket")
+	}
+
+	up := newFakeUpstream(t)
+	router := netip.MustParseAddr("127.0.0.3")
+	s := New(Options{
+		Upstream: up.ln.Addr().String(), Dial: directDial(&dialRecord{}),
+		RatePerSource: 1,
+		SourceLimit: func(src netip.Addr) (int, int) {
+			if src == router {
+				return 0, -1
+			}
+			return 0, 0
+		},
+	})
+	if _, rate := s.limits(router); rate >= 0 {
+		t.Fatalf("router rate %d, want unlimited", rate)
+	}
+	addr := startServer(t, s)
+	q := buildQuery(1, "a.example", typeA, 0)
+	if n, tc := udpReplies(t, router.String(), addr, q, 100); n != 100 || tc != 0 {
+		t.Fatalf("unlimited source: %d full, %d TC of 100", n, tc)
 	}
 }
