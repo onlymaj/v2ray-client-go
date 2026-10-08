@@ -3,8 +3,12 @@ package routeros
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,13 +37,42 @@ type Client struct {
 
 // NewClient returns a client for the router at baseURL (scheme://host[:port],
 // with or without a trailing /rest). insecure skips TLS verification, which
-// RouterOS's default self-signed certificate needs.
-func NewClient(baseURL, user, pass string, insecure bool) *Client {
+// RouterOS's default self-signed certificate needs. certSHA256, when not
+// empty, is the hex SHA-256 of the router's DER leaf certificate (colons and
+// spaces allowed): the chain is not checked, but the leaf must match the pin.
+// It takes precedence over insecure.
+func NewClient(baseURL, user, pass string, insecure bool, certSHA256 string) *Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
 	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: insecure}
+	if certSHA256 != "" {
+		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, VerifyConnection: pinVerifier(certSHA256)}
+	}
 	tr.MaxIdleConnsPerHost = 2
 	return newClient(baseURL, user, pass, &http.Client{Transport: tr, Timeout: 10 * time.Second})
+}
+
+// pinVerifier returns a tls.Config.VerifyConnection that accepts only a
+// leaf certificate whose SHA-256 equals pin. An unparsable pin fails every
+// handshake, so a typo never falls back to "accept anything".
+func pinVerifier(pin string) func(tls.ConnectionState) error {
+	want, err := hex.DecodeString(strings.NewReplacer(":", "", " ", "").Replace(strings.TrimSpace(pin)))
+	if err == nil && len(want) != sha256.Size {
+		err = fmt.Errorf("want %d bytes, got %d", sha256.Size, len(want))
+	}
+	return func(cs tls.ConnectionState) error {
+		if err != nil {
+			return fmt.Errorf("routeros: invalid certSha256: %w", err)
+		}
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("routeros: no server certificate")
+		}
+		got := sha256.Sum256(cs.PeerCertificates[0].Raw)
+		if subtle.ConstantTimeCompare(got[:], want) != 1 {
+			return fmt.Errorf("routeros: certificate SHA-256 %x does not match certSha256", got)
+		}
+		return nil
+	}
 }
 
 func newClient(baseURL, user, pass string, hc *http.Client) *Client {

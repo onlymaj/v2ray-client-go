@@ -60,8 +60,8 @@ type Status struct {
 }
 
 type config struct {
-	enabled               bool
-	url, user, pass, list string
+	enabled                           bool
+	url, user, pass, list, certSHA256 string
 }
 
 type Syncer struct {
@@ -101,9 +101,11 @@ func New(opts Options) *Syncer {
 
 // SetConfig updates the router connection settings. The caller merges the
 // ROS_URL / ROS_USER / ROS_PASS environment overrides beforehand.
-func (s *Syncer) SetConfig(enabled bool, url, user, pass, list string) {
+// certSHA256 pins the router's leaf certificate (see NewClient); empty
+// means no verification unless Options.VerifyTLS is set.
+func (s *Syncer) SetConfig(enabled bool, url, user, pass, list, certSHA256 string) {
 	s.mu.Lock()
-	c := config{enabled, url, user, pass, list}
+	c := config{enabled, url, user, pass, list, certSHA256}
 	if c != s.cfg {
 		s.cfg = c
 		s.gen++
@@ -154,6 +156,7 @@ func (s *Syncer) Run(ctx context.Context) {
 
 		clientCfg config
 		client    *Client
+		warned    bool
 	)
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
@@ -183,7 +186,11 @@ func (s *Syncer) Run(ctx context.Context) {
 				if s.opts.HTTPClient != nil {
 					client = newClient(cfg.url, cfg.user, cfg.pass, s.opts.HTTPClient)
 				} else {
-					client = NewClient(cfg.url, cfg.user, cfg.pass, !s.opts.VerifyTLS)
+					client = NewClient(cfg.url, cfg.user, cfg.pass, !s.opts.VerifyTLS, cfg.certSHA256)
+					if cfg.certSHA256 == "" && !s.opts.VerifyTLS && !warned {
+						warned = true
+						s.opts.Logf("routeros: certSha256 is not set; the router's TLS certificate is not verified and the password can be intercepted")
+					}
 				}
 			}
 			key := fmt.Sprint(cfg, desired, resolveErr == nil)

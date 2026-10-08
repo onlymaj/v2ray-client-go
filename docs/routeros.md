@@ -104,9 +104,16 @@ add name=v2ray key=ROS_PASS value="another-long-random"
 | Variable | Required | Meaning |
 |---|---|---|
 | `ADMIN_PASSWORD` | yes | Web UI / API login. The app refuses to start without it. |
-| `ROS_URL`, `ROS_USER`, `ROS_PASS` | no | REST access to this router, used to keep the `no-proxy` address list in sync (section 9). Leave them out to manage the list by hand. |
+| `ROS_URL`, `ROS_USER`, `ROS_PASS` | no | REST access to this router, used to keep the `no-proxy` address list in sync (section 9). Leave them out to manage the list by hand. If `ROS_PASS` is set, `ROS_URL` must be set too; otherwise sync stays off, so that a UI user cannot point the URL at another host and capture the password. |
+| `UI_HOSTS` | no | Comma-separated host names allowed in the `Host` header of UI/API requests. IP literals are always allowed and any other name is rejected, which blocks DNS-rebinding attacks from web pages a LAN user opens. Set it only if you reach the UI through a name, for example `UI_HOSTS=v2ray.lan`. |
 | `CONFIG_DIR` | preset `/data` | Where `config.json` lives. |
 | `GOMEMLIMIT` | preset `32MiB` | Go heap soft limit. Raise it only if you set a higher container memory limit. |
+
+**These values are stored in plaintext in the router configuration.** Any router user with the `read` policy can see them with `/container/envs/print`, and they appear in `/export` output and in `/system/backup` files. So:
+
+- Use long random passwords that are not used anywhere else, and a different one for each variable.
+- Use `/export hide-sensitive` (the default on recent v7) when you share an export, and keep backup files private.
+- Do not give router accounts the `read` policy unless they need it.
 
 > RouterOS 7.20 and later renamed these properties: envs and mounts use `list=` instead of `name=`, and `/container/add` takes `envlists=` / `mountlists=`. Run `/container/envs/add ?` to see which form your version accepts.
 
@@ -249,13 +256,34 @@ Browsers try HTTP/3 over UDP 443 first. UDP is not proxied, so QUIC would go out
 
 To keep QUIC for direct destinations, add `dst-address-list=!no-proxy`. A `reject` is better than a `drop` here because browsers fall back immediately instead of waiting for a timeout.
 
+### IPv6 (required)
+
+**This client proxies IPv4 only.** Every rule above (mangle, QUIC reject, DNS dst-nat, kill switch) is IPv4. If your ISP gives you IPv6, LAN hosts prefer it, and all IPv6 traffic (web, QUIC, DNS) goes out directly with your real address, even with the strict kill switch. Do one of the following before you rely on the proxy:
+
+- **Disable IPv6** (simplest; a reboot may be needed):
+
+  ```routeros
+  /ipv6/settings/set disable-ipv6=yes
+  ```
+
+- **Or keep IPv6 on the router but block it for the LAN.** Drop forwarded IPv6 from the LAN and stop advertising IPv6 DNS servers:
+
+  ```routeros
+  /ipv6/firewall/filter/add chain=forward action=reject reject-with=icmp-no-route \
+      in-interface-list=LAN comment="v2ray-client: no direct IPv6 from LAN" place-before=0
+  /ipv6/nd/set [find] advertise-dns=no
+  /ipv6/dhcp-server/remove [find]
+  ```
+
+  `reject` makes clients fall back to IPv4 at once. Check from a LAN host with `curl -6 https://ifconfig.me`; it must fail.
+
 ### UDP
 
 Only TCP and DNS are handled. Other UDP from the LAN (games, VoIP, WebRTC, WireGuard, and QUIC if you do not block it) **goes out directly through the WAN with your real IP**. You can block it with a forward rule, but most of those applications then stop working, so decide based on what you need. UDP proxying is out of scope for this client.
 
 ## 8. DNS
 
-The container runs a DNS inbound on port 53. It answers queries by sending them as DNS over TCP to `settings.dnsUpstream` (default `1.1.1.1:53`) through the client that your rules pick. This avoids poisoned plaintext answers from the ISP. You can get LAN DNS to it in two ways.
+The container runs a DNS inbound on port 53. It answers queries by sending them as DNS over TCP to `settings.dnsUpstream` (default `1.1.1.1:53`) through the client that your rules pick. This avoids poisoned plaintext answers from the ISP. You can get LAN DNS to it in two ways. **Use option A** unless you have a reason not to.
 
 ### Option A (recommended): dst-nat LAN DNS to the container
 
@@ -279,32 +307,52 @@ add chain=dstnat action=dst-nat in-interface-list=LAN protocol=tcp dst-port=53 \
 
 - LAN clients keep using the router (the defconf DHCP server hands it out). They keep the router's cache and static entries, and the router's own lookups are also protected.
 - **The container must then not use the router as its resolver.** Otherwise the router asks the container, the container asks the router, and so on. Recreate the container with `dns=` set to a public resolver, for example `dns=1.1.1.1`. That traffic goes out directly because it comes from the container. The container only resolves proxy server and subscription hostnames there.
+- Those lookups are plain UDP, so your ISP sees which proxy hostnames you use and can block or poison them. With option B, **enter proxy servers by IP address**, not hostname.
 - If the container is down, the router cannot resolve any names at all: no NTP and no updates. Option A breaks only LAN DNS. You can add a second server (`servers=172.17.0.2,1.1.1.1`), but RouterOS may query both, which leaks lookups.
 
 In both options the router's input firewall must accept DNS from LAN (defconf already does). For option A, the forward chain must allow LAN → 172.17.0.2:53. Defconf allows that.
 
 ## 9. RouterOS REST API for no-proxy sync
 
-The app updates the `no-proxy` address list through the REST API. Give it a dedicated user with minimal rights, reachable only from the container.
+The app can update the `no-proxy` address list through the REST API. **This is optional.** RouterOS cannot limit a user to one address list: the `write` policy lets the user change any setting except users, including firewall rules, routes and scripts. Whoever controls the container (it runs as root and parses data from remote servers) then controls the router. If that risk is too high for you, skip this section and keep `no-proxy` up to date by hand.
+
+If you enable it, give the app a dedicated user with as few rights as RouterOS allows, reachable only from the container:
 
 ```routeros
 # self-signed certificate for www-ssl
 /certificate/add name=v2ray-api common-name=172.17.0.1 subject-alt-name=IP:172.17.0.1 \
     key-usage=digital-signature,key-encipherment,tls-server days-valid=3650
 /certificate/sign v2ray-api
-/ip/service/set www-ssl certificate=v2ray-api disabled=no
+# REST only from the container and your admin hosts (replace 192.168.88.10)
+/ip/service/set www-ssl certificate=v2ray-api disabled=no address=172.17.0.2/32,192.168.88.10/32
 
 # limited group + user, login only from the container
-/user/group/add name=v2ray-api policy=read,write,api,rest-api comment="v2ray-client: no-proxy sync"
+/user/group/add name=v2ray-api policy=read,write,rest-api comment="v2ray-client: no-proxy sync"
 /user/add name=v2ray group=v2ray-api password="another-long-random" address=172.17.0.2/32
 ```
 
-- `address=172.17.0.2/32` on the user means the credentials work only from the container, even if they leak.
-- If `www-ssl` already has an `address=` restriction for your admin hosts, add `172.17.0.2/32` to it.
-- **Alternative: plain HTTP on the container bridge only.** Enable `www`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3. The traffic never leaves the router, but the password crosses the veth in cleartext. Do not open `www` to the LAN for this purpose.
-- The certificate is self-signed, so the app's RouterOS client has to accept it. The scratch image has no system trust store, and the embedded public roots do not include your router's certificate. Check the RouterOS settings in the UI for how verification is handled in your build.
+- Do **not** add the `api` policy. It opens the binary API (port 8728) to this user, which REST does not need. If your build has no `rest-api` policy, update RouterOS.
+- `address=172.17.0.2/32` on the user means the credentials work only from the container, even if they leak. Without `address=` on `www-ssl`, enabling it also opens WebFig over HTTPS to the whole LAN.
+- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3. The traffic never leaves the router, but the password crosses the veth in cleartext. Do not open `www` to the LAN for this purpose.
 
-Configure the same URL, user and password in the UI (Settings → RouterOS), or pass them as `ROS_*` envs (section 5). Check that it works:
+### Pin the certificate (`certSha256`)
+
+The certificate is self-signed, and the scratch image has no trust store that could check it. Without a pin the app accepts **any** certificate and logs a warning at startup, so anything that can answer on `172.17.0.1:443` gets the REST password. Set `settings.routeros.certSha256` (UI: Settings → RouterOS) to the SHA-256 of the certificate, as 64 hex characters:
+
+```routeros
+/certificate/print proplist=name,fingerprint where name=v2ray-api
+```
+
+RouterOS shows the SHA-256 of the certificate as `fingerprint`. To double-check from an admin host listed in `www-ssl address=`:
+
+```sh
+openssl s_client -connect 172.17.0.1:443 </dev/null 2>/dev/null \
+  | openssl x509 -outform der | sha256sum
+```
+
+Both must print the same value. The app then rejects any other certificate, even if it is otherwise valid. When you renew or replace the certificate, update the pin, or the sync stops (it shows in the RouterOS status in the UI).
+
+Configure the same URL, user, password and pin in the UI (Settings → RouterOS), or pass the URL and credentials as `ROS_*` envs (section 5). Check that it works:
 
 ```routeros
 /ip/firewall/address-list/print where list=no-proxy
@@ -316,7 +364,7 @@ What should happen to proxied traffic when no proxy works? The app and the route
 
 **Inside the app** (`settings.killSwitch`, for when the container runs but every client in the selected group is down):
 
-- `block` (default): the connection is refused. Nothing leaks.
+- `block` (default): the connection is refused, so proxied TCP does not leak. This covers only what the router sends to the container: UDP (section 7) and IPv6 (unless you followed "IPv6 (required)") never reach it.
 - `direct`: the connection goes out directly from the container.
 
 **On the router** (for when the container itself is down or stopped):
@@ -339,7 +387,21 @@ Add only **one** of these. If you add neither, whether marked traffic falls back
 
 ## 11. Web UI
 
-Open `http://172.17.0.2/` from a LAN host and log in with `ADMIN_PASSWORD`. The SOCKS5 (`172.17.0.2:1080`) and HTTP CONNECT (`172.17.0.2:8118`) inbounds can also be reached from the LAN. Set their port to 0 in the settings to disable them. To keep the UI away from some LAN hosts, add a forward rule that allows TCP 80 to `172.17.0.2` only from your admin addresses.
+Open `http://172.17.0.2/` from a LAN host and log in with `ADMIN_PASSWORD`.
+
+**Required: restrict the container to your admin hosts.** The UI is plain HTTP, so the password crosses the LAN (and Wi-Fi) in cleartext, and by default every LAN or guest host could try to log in. Allow the UI only from your admin addresses (replace `192.168.88.10`; add more rules or use an address list for several hosts):
+
+```routeros
+/ip/firewall/filter
+add chain=forward action=accept dst-address=172.17.0.2 protocol=tcp dst-port=80 \
+    src-address=192.168.88.10 comment="v2ray-client: UI from admin host" place-before=[find action=fasttrack-connection]
+add chain=forward action=reject reject-with=tcp-reset dst-address=172.17.0.2 protocol=tcp dst-port=!53 \
+    comment="v2ray-client: no other direct access to the container" place-before=[find action=fasttrack-connection]
+```
+
+The second rule also blocks the SOCKS and HTTP ports if you enable them. Proxied traffic is not affected: it is routed to the container with its original destination address, not addressed to `172.17.0.2`. DNS (port 53) stays open for option A in section 8.
+
+The SOCKS5 and HTTP CONNECT inbounds are **off by default** (port 0). They have no authentication and can connect to any address, including the router's own services at `172.17.0.1`. A connection through them reaches the router with the container's address, which gets around the `address=172.17.0.2/32` limit on the REST user. Enable them (settings `ports.socks` / `ports.http`, then restart) only if you need them, and allow them only from trusted hosts with a forward rule like the one above.
 
 ## Troubleshooting
 

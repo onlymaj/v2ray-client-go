@@ -2,6 +2,8 @@ package routeros
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -170,7 +172,7 @@ func TestSyncAddRemoveOwnership(t *testing.T) {
 	go func() { s.Run(ctx); close(done) }()
 	defer func() { cancel(); <-done }()
 
-	s.SetConfig(true, f.srv.URL+"/", "admin", "secret", "no-proxy")
+	s.SetConfig(true, f.srv.URL+"/", "admin", "secret", "no-proxy", "")
 	s.SetServers([]string{"srv.example", "9.9.9.9", "1.2.3.4", "2001:db8::2", "1.2.3.4"})
 
 	waitFor(t, "initial sync", func() bool {
@@ -237,7 +239,7 @@ func TestSyncBackoff(t *testing.T) {
 	defer func() { cancel(); <-done }()
 
 	s.SetServers([]string{"1.1.1.1"})
-	s.SetConfig(true, f.srv.URL, "admin", "secret", "no-proxy")
+	s.SetConfig(true, f.srv.URL, "admin", "secret", "no-proxy", "")
 	time.Sleep(500 * time.Millisecond)
 	// 20+40+80+80+80+80+80 ms: about 7 attempts in 500 ms; hammering would be hundreds.
 	if n := f.gets.Load(); n < 3 || n > 12 {
@@ -251,7 +253,7 @@ func TestSyncBackoff(t *testing.T) {
 	waitFor(t, "recovery", func() bool { st := s.Status(); return st.LastError == "" && st.Entries == 1 })
 
 	// Disabled: no further calls.
-	s.SetConfig(false, f.srv.URL, "admin", "secret", "no-proxy")
+	s.SetConfig(false, f.srv.URL, "admin", "secret", "no-proxy", "")
 	time.Sleep(20 * time.Millisecond)
 	n := f.gets.Load()
 	time.Sleep(200 * time.Millisecond)
@@ -272,10 +274,68 @@ func TestClientErrors(t *testing.T) {
 		t.Fatalf("err %v", err)
 	}
 	// Self-signed cert: NewClient with insecure=true works, false fails.
-	if _, err := NewClient(f.srv.URL, "admin", "secret", true).List(context.Background(), "x"); err != nil {
+	if _, err := NewClient(f.srv.URL, "admin", "secret", true, "").List(context.Background(), "x"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClient(f.srv.URL, "admin", "secret", false).List(context.Background(), "x"); err == nil {
+	if _, err := NewClient(f.srv.URL, "admin", "secret", false, "").List(context.Background(), "x"); err == nil {
 		t.Fatal("verified a self-signed cert")
+	}
+}
+
+func TestClientCertPin(t *testing.T) {
+	f := newFakeROS(t)
+	sum := sha256.Sum256(f.srv.Certificate().Raw)
+	good := hex.EncodeToString(sum[:])
+	var colons []string
+	for _, b := range sum {
+		colons = append(colons, fmt.Sprintf("%02X", b))
+	}
+	for _, pin := range []string{good, strings.ToUpper(good), strings.Join(colons, ":")} {
+		if _, err := NewClient(f.srv.URL, "admin", "secret", false, pin).List(context.Background(), "x"); err != nil {
+			t.Fatalf("pin %q: %v", pin, err)
+		}
+	}
+	bad := sum
+	bad[0] ^= 1
+	for _, pin := range []string{hex.EncodeToString(bad[:]), "zz", good[:10]} {
+		// insecure=true must not override a pin; a malformed pin fails closed.
+		if _, err := NewClient(f.srv.URL, "admin", "secret", true, pin).List(context.Background(), "x"); err == nil {
+			t.Fatalf("pin %q accepted", pin)
+		}
+	}
+}
+
+func TestSyncWarnsWithoutPin(t *testing.T) {
+	f := newFakeROS(t)
+	var mu sync.Mutex
+	var logs []string
+	logf := func(format string, args ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}
+	s := New(Options{Logf: logf})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	s.SetConfig(true, f.srv.URL, "admin", "secret", "no-proxy", "")
+	waitFor(t, "sync", func() bool { return !s.Status().LastSync.IsZero() })
+	s.SetConfig(true, f.srv.URL, "admin", "secret", "other", "") // new client, no second warning
+	sum := sha256.Sum256(f.srv.Certificate().Raw)
+	s.SetConfig(true, f.srv.URL, "admin", "secret", "no-proxy", hex.EncodeToString(sum[:]))
+	waitFor(t, "pinned sync", func() bool { st := s.Status(); return st.LastError == "" && !st.LastSync.IsZero() })
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	n := 0
+	for _, l := range logs {
+		if strings.Contains(l, "certSha256 is not set") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("warnings %d, logs %q", n, logs)
 	}
 }

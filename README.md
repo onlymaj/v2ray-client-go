@@ -17,12 +17,12 @@ Router setup: **[docs/routeros.md](docs/routeros.md)**.
 - **Health checks** (TCP and real-delay), traffic stats with 24 h / 60 s history, and a live connection table.
 - **Share links and subscriptions:** import and export `vless://` / `vmess://` links and subscription URLs.
 - **RouterOS integration:** keeps the router's `no-proxy` address list in sync through the REST API, so direct traffic and proxy server addresses never pass through the container.
-- **Kill switch:** `block` (default) or `direct` when no client is available.
+- **Kill switch:** `block` (default) or `direct` when no client is available. It covers IPv4 TCP only.
 
 ### Out of scope
 
 - UDP proxying. Only TCP and DNS are handled. Other UDP goes direct unless the router blocks it. The RouterOS guide blocks QUIC so browsers fall back to TCP.
-- IPv6 transparent proxying.
+- IPv6 transparent proxying. IPv6 traffic bypasses the proxy and the kill switch, so the RouterOS guide disables IPv6 or blocks it for the LAN (a required step).
 - Server mode, Trojan, Shadowsocks, Hysteria, TUIC, and xray's JSON config format.
 - The Vision splice/direct-copy optimization. Vision padding and unpadding are implemented, and the data is still copied through userspace.
 
@@ -83,17 +83,18 @@ The container is configured with environment variables. Everything else is set i
 | `ADMIN_PASSWORD` | (required) | UI/API password. It is hashed with scrypt at startup, and login is rate-limited per IP. |
 | `CONFIG_DIR` | `/data` | Directory for `config.json`. Writes are atomic (temp file + rename) and happen only when something changes. |
 | `GOMEMLIMIT` | `32MiB` | Go heap soft limit |
-| `ROS_URL` / `ROS_USER` / `ROS_PASS` | | Optional RouterOS REST credentials for the `no-proxy` sync |
+| `ROS_URL` / `ROS_USER` / `ROS_PASS` | | Optional RouterOS REST credentials for the `no-proxy` sync. `ROS_PASS` is used only together with `ROS_URL`. Set `routeros.certSha256` too, or the router's certificate is not verified. |
+| `UI_HOSTS` | | Comma-separated host names allowed in the UI/API `Host` header (IP literals always are); DNS-rebinding guard |
 
 `config.json` holds `clients`, `groups`, `rules`, `subscriptions` and `settings`. Default settings:
 
 | Setting | Default |
 |---|---|
-| `ports.transparent` / `socks` / `http` / `dns` / `ui` | `12345` / `1080` / `8118` / `53` / `80` (0 disables socks/http/dns) |
+| `ports.transparent` / `socks` / `http` / `dns` / `ui` | `12345` / `0` / `0` / `53` / `80` (0 disables; SOCKS and HTTP have no authentication, so they are off by default) |
 | `healthUrl`, `healthInterval` | `https://www.gstatic.com/generate_204`, 60 s |
 | `killSwitch` | `block` (or `direct`) |
 | `dnsUpstream` | `1.1.1.1:53`, queried over TCP through the proxy |
-| `routeros` | `url` `https://172.17.0.1`, `addressList` `no-proxy`, disabled until configured |
+| `routeros` | `url` `https://172.17.0.1`, `addressList` `no-proxy`, `certSha256` empty (no verification), disabled until configured |
 
 On first start, the config has an empty failover group called `default` and one default rule that points to it.
 
