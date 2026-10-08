@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +46,7 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/routeros"
 	"github.com/onlymaj/v2ray-client-go/internal/stats"
 	"github.com/onlymaj/v2ray-client-go/internal/web"
+	"golang.org/x/net/netutil"
 )
 
 func main() {
@@ -116,27 +118,15 @@ func run() error {
 		if err := d.Update(c); err != nil {
 			log.Printf("config: %v", err)
 		}
-		// Only servers of clients that some group or rule can route to go into
-		// the RouterOS no-proxy list: a subscription can add any hostname, and
-		// whatever it resolves to would then bypass the proxy.
-		used := map[string]bool{}
-		for _, g := range c.Groups {
-			for _, m := range g.Members {
-				used[m] = true
-			}
-		}
-		for _, r := range c.Rules {
-			if r.Target.Kind == "client" {
-				used[r.Target.ID] = true
-			}
-		}
+		// Every enabled client's server goes into the RouterOS no-proxy list
+		// (spec). docs/routeros.md only uses that list for router-originated
+		// traffic, never to exempt LAN traffic, so a subscription can't make
+		// LAN traffic to arbitrary IPs skip the proxy.
 		var enabled, servers []string
 		for _, cl := range c.Clients {
 			if cl.Enabled {
 				enabled = append(enabled, cl.ID)
-				if used[cl.ID] {
-					servers = append(servers, cl.Address)
-				}
+				servers = append(servers, cl.Address)
 			}
 		}
 		checker.SetClients(enabled)
@@ -223,13 +213,20 @@ func run() error {
 	// ReadTimeout bounds slow-body uploads; the SSE handler clears its own
 	// deadlines.
 	hs := &http.Server{
-		Addr: ":" + strconv.Itoa(int(p.UI)), Handler: ui,
+		Handler:           ui,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
-		IdleTimeout: 120 * time.Second, MaxHeaderBytes: 16 << 10,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
 	}
+	uiLn, err := net.Listen("tcp", ":"+strconv.Itoa(int(p.UI)))
+	if err != nil {
+		return fmt.Errorf("ui: %w", err)
+	}
+	// The UI is reachable without auth up to the login page; cap
+	// connections so idle keep-alives from one LAN host can't exhaust memory.
+	uiLn = &capListener{Listener: netutil.LimitListener(uiLn, uiMaxConns), perIP: map[netip.Addr]int{}}
 	go func() {
-		log.Printf("ui listening on %s", hs.Addr)
-		if err := hs.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("ui listening on :%d", p.UI)
+		if err := hs.Serve(uiLn); !errors.Is(err, http.ErrServerClosed) {
 			errc <- fmt.Errorf("ui: %w", err)
 		}
 	}()
@@ -321,3 +318,57 @@ func (r runtime) GroupCurrent(id string) string          { return r.d.GroupCurre
 func (r runtime) Series(target, rng string) (any, error) { return r.st.Series(target, rng) }
 func (r runtime) Connections() any                       { return r.st.Connections() }
 func (r runtime) CheckNow(id string)                     { go r.hc.CheckNow(r.ctx, id) }
+
+const (
+	uiMaxConns      = 64 // all UI/API connections
+	uiMaxConnsPerIP = 16
+)
+
+// capListener closes connections from a source that already holds
+// uiMaxConnsPerIP open UI connections.
+type capListener struct {
+	net.Listener
+	mu    sync.Mutex
+	perIP map[netip.Addr]int
+}
+
+func (l *capListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		ap, err := netip.ParseAddrPort(c.RemoteAddr().String())
+		if err != nil {
+			return c, nil
+		}
+		ip := ap.Addr().Unmap()
+		l.mu.Lock()
+		if l.perIP[ip] >= uiMaxConnsPerIP {
+			l.mu.Unlock()
+			c.Close()
+			continue
+		}
+		l.perIP[ip]++
+		l.mu.Unlock()
+		return &capConn{Conn: c, release: func() {
+			l.mu.Lock()
+			if l.perIP[ip]--; l.perIP[ip] <= 0 {
+				delete(l.perIP, ip)
+			}
+			l.mu.Unlock()
+		}}, nil
+	}
+}
+
+type capConn struct {
+	net.Conn
+	once    sync.Once
+	release func()
+}
+
+func (c *capConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(c.release)
+	return err
+}
