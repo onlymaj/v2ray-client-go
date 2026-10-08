@@ -217,6 +217,10 @@ func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := share.ParseBulk(body.Text)
+	if err := tooManyLinks(res); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var added []config.Client
 	skipped := res.Skipped
 	if err := s.update(func(cfg *config.Config) error {
@@ -246,8 +250,10 @@ func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := make([]clientView, 0, len(added))
-	for _, c := range added {
-		s.rt.CheckNow(c.ID)
+	for i, c := range added {
+		if i < maxCheckNow {
+			s.rt.CheckNow(c.ID)
+		}
 		views = append(views, s.clientView(c))
 	}
 	errs := res.Errors

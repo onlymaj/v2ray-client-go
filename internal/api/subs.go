@@ -124,7 +124,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	var res share.Result
 	if ferr == nil {
 		res = share.DecodeSubscription(body)
-		if len(res.Clients) == 0 {
+		if ferr = tooManyLinks(res); ferr == nil && len(res.Clients) == 0 {
 			ferr = fmt.Errorf("no supported links (%d errors, %d skipped)", len(res.Errors), res.Skipped)
 		}
 	}
@@ -189,8 +189,10 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	if err != nil {
 		return config.Subscription{}, err
 	}
-	for _, cid := range fresh {
-		s.rt.CheckNow(cid)
+	for i, cid := range fresh {
+		if i < maxCheckNow {
+			s.rt.CheckNow(cid)
+		}
 	}
 	return out, nil
 }

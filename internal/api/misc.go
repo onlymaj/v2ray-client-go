@@ -33,7 +33,8 @@ func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // putSettings replaces the settings. An empty routeros.password keeps the
-// stored one.
+// stored one, unless routeros.url or routeros.user changes: then the stored
+// password is cleared, so a session cannot send it to another server.
 func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var st config.Settings
 	if err := decode(r, &st); err != nil {
@@ -41,8 +42,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.update(func(cfg *config.Config) error {
-		if st.RouterOS.Password == "" {
-			st.RouterOS.Password = cfg.Settings.RouterOS.Password
+		old := cfg.Settings.RouterOS
+		if st.RouterOS.Password == "" && st.RouterOS.URL == old.URL && st.RouterOS.User == old.User {
+			st.RouterOS.Password = old.Password
 		}
 		cfg.Settings = st
 		return nil

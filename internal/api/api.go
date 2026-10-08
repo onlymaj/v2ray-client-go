@@ -3,7 +3,10 @@
 // Every route except /api/login, /api/logout and /api/me needs a session
 // cookie. Mutating requests (POST, PUT, PATCH, DELETE) must carry
 // Content-Type: application/json, even when they have no body; together with
-// the SameSite=Strict cookie this blocks cross-site form posts (CSRF).
+// the SameSite=Strict cookie this blocks cross-site form posts (CSRF). An
+// Origin header on a mutating request must match Host. /api/ requests are
+// refused unless Host is an IP literal, localhost or in Options.AllowedHosts,
+// which blocks DNS rebinding (a foreign name resolved to this address).
 // Paths outside /api/ go to Options.Web.
 package api
 
@@ -14,12 +17,17 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
 	"github.com/onlymaj/v2ray-client-go/internal/events"
+	"github.com/onlymaj/v2ray-client-go/internal/share"
 )
 
 // Status is the live health of one client.
@@ -61,11 +69,19 @@ type Options struct {
 	Runtime       Runtime
 	AdminPassword string
 	Web           http.Handler // serves everything outside /api/
+	// AllowedHosts are extra host names (no port) accepted in the Host
+	// header of /api/ requests, besides IP literals and localhost.
+	AllowedHosts []string
 	// Fetch downloads a subscription. Default: HTTP GET, 30s timeout, 4 MB cap.
 	Fetch func(ctx context.Context, url string) ([]byte, error)
 }
 
-const maxBody = 4 << 20
+const (
+	maxBody = 4 << 20
+	// maxCheckNow caps the immediate health checks started for new
+	// clients; the health checker reaches the rest on its schedule.
+	maxCheckNow = 50
+)
 
 type server struct {
 	store *config.Store
@@ -74,6 +90,7 @@ type server struct {
 	web   http.Handler
 	fetch func(ctx context.Context, url string) ([]byte, error)
 	auth  *auth
+	hosts map[string]bool
 	mux   *http.ServeMux
 }
 
@@ -88,7 +105,12 @@ func New(opts Options) (http.Handler, error) {
 	}
 	s := &server{
 		store: opts.Store, bus: opts.Bus, rt: opts.Runtime, web: opts.Web,
-		fetch: opts.Fetch, auth: a, mux: http.NewServeMux(),
+		fetch: opts.Fetch, auth: a, hosts: map[string]bool{}, mux: http.NewServeMux(),
+	}
+	for _, h := range opts.AllowedHosts {
+		if h = normHost(h); h != "" {
+			s.hosts[h] = true
+		}
 	}
 	if s.rt == nil {
 		s.rt = nopRuntime{}
@@ -158,8 +180,18 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if !s.hostAllowed(r.Host) {
+		writeErr(w, http.StatusForbidden, "host not allowed")
+		return
+	}
 	switch r.Method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if o := r.Header.Get("Origin"); o != "" {
+			if u, err := url.Parse(o); err != nil || !strings.EqualFold(u.Host, r.Host) {
+				writeErr(w, http.StatusForbidden, "cross-origin request")
+				return
+			}
+		}
 		if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
 			writeErr(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 			return
@@ -167,6 +199,36 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// normHost lowercases host and strips the port, IPv6 brackets and a
+// trailing dot.
+func normHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return strings.TrimSuffix(strings.ToLower(host), ".")
+}
+
+func (s *server) hostAllowed(host string) bool {
+	h := normHost(host)
+	if h == "" {
+		return false
+	}
+	if _, err := netip.ParseAddr(h); err == nil {
+		return true
+	}
+	return h == "localhost" || s.hosts[h]
+}
+
+// tooManyLinks reports whether share.ParseBulk stopped at share.MaxLinks;
+// the API refuses such input rather than taking the first MaxLinks links.
+func tooManyLinks(res share.Result) error {
+	if n := len(res.Errors); n > 0 && strings.HasPrefix(res.Errors[n-1].Err, "too many links") {
+		return errors.New(res.Errors[n-1].Err)
+	}
+	return nil
 }
 
 // httpError carries a status code out of a Store.Update callback.
@@ -221,21 +283,30 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 
-func defaultFetch(ctx context.Context, url string) ([]byte, error) {
+// defaultFetch downloads a subscription: 30s timeout, 4 MB cap, at most
+// maxRedirects redirects. The URL itself may point anywhere, including the
+// LAN (an admin may host a subscription there). A redirect to another host
+// may not reach a loopback, link-local, private, CGNAT or unspecified
+// address, so a subscription server cannot aim requests at the router or
+// the LAN; the check runs on every dial, so DNS rebinding of the redirect
+// target does not get around it.
+func defaultFetch(ctx context.Context, rawURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "v2ray-client-go")
-	resp, err := http.DefaultClient.Do(req)
+	hc := fetchClient(req.URL.Hostname())
+	defer hc.CloseIdleConnections()
+	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", url, resp.Status)
+		return nil, fmt.Errorf("GET %s: %s", rawURL, resp.Status)
 	}
 	const limit = 4 << 20
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
@@ -246,6 +317,80 @@ func defaultFetch(ctx context.Context, url string) ([]byte, error) {
 		return nil, errors.New("subscription is larger than 4 MB")
 	}
 	return b, nil
+}
+
+const maxRedirects = 3
+
+var errRedirectBlocked = errors.New("redirect to a local or private address refused")
+
+// fetchClient returns a client for one fetch from origHost. Connections to
+// any other host must go to a public address.
+func fetchClient(origHost string) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := net.Dialer{Timeout: 10 * time.Second}
+		if host, _, err := net.SplitHostPort(addr); err != nil || !strings.EqualFold(host, origHost) {
+			d.Control = publicOnly
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+	return &http.Client{
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > maxRedirects {
+				return fmt.Errorf("more than %d redirects", maxRedirects)
+			}
+			host := req.URL.Hostname()
+			if strings.EqualFold(host, origHost) {
+				return nil
+			}
+			// Fail early with a clear error; publicOnly enforces it on dial.
+			addrs, err := net.DefaultResolver.LookupNetIP(req.Context(), "ip", host)
+			if err != nil {
+				return err
+			}
+			for _, a := range addrs {
+				if blockedAddr(a) {
+					return fmt.Errorf("%w: %s", errRedirectBlocked, host)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+// publicOnly is a net.Dialer Control hook that refuses blocked addresses.
+func publicOnly(network, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return err
+	}
+	if blockedAddr(ap.Addr()) {
+		return fmt.Errorf("%w: %s", errRedirectBlocked, ap.Addr())
+	}
+	return nil
+}
+
+var blockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"), // CGNAT
+	netip.MustParsePrefix("64:ff9b::/96"),  // NAT64 (checked by its IPv4 part below)
+}
+
+// blockedAddr reports whether a is loopback, link-local, private (RFC 1918,
+// ULA), CGNAT, multicast or unspecified.
+func blockedAddr(a netip.Addr) bool {
+	a = a.Unmap()
+	if a.Is6() && blockedPrefixes[2].Contains(a) {
+		b := a.As16()
+		return blockedAddr(netip.AddrFrom4([4]byte(b[12:])))
+	}
+	if a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() ||
+		a.IsInterfaceLocalMulticast() || a.IsMulticast() || a.IsUnspecified() || a.IsPrivate() {
+		return true
+	}
+	return blockedPrefixes[0].Contains(a) || blockedPrefixes[1].Contains(a)
 }
 
 type nopRuntime struct{}

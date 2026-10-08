@@ -23,8 +23,18 @@ var scryptN = 16384
 const (
 	cookieName    = "nv2_session"
 	sessionTTL    = 7 * 24 * time.Hour
-	loginAttempts = 5
+	loginAttempts = 5 // per IP and loginWindow
 	loginWindow   = time.Minute
+	// globalAttempts caps login attempts from all IPs together per
+	// loginWindow, so rotating source addresses (e.g. IPv6 privacy
+	// addresses) does not multiply the guess rate. The trade-off: a flood
+	// from many addresses also blocks a new admin device until it stops.
+	// IPs that logged in successfully before (trustedIPs) are exempt from
+	// this cap (not from the per-IP one), so the usual admin device keeps
+	// working during a flood.
+	globalAttempts = 30
+	maxTrusted     = 16
+	maxLoginBody   = 1 << 10
 )
 
 type auth struct {
@@ -35,13 +45,16 @@ type auth struct {
 
 	mu       sync.Mutex
 	sessions map[string]time.Time  // token -> expiry
-	limits   map[string]*rateEntry // client IP -> failed attempts
+	limits   map[string]*rateEntry // client IP -> attempts in the window
+	global   rateEntry             // attempts from all IPs
+	trusted  map[string]time.Time  // IP -> last successful login
 	now      func() time.Time
 }
 
 type rateEntry struct {
-	start time.Time
-	n     int
+	start    time.Time
+	n        int
+	inflight bool // a login from this IP is being checked
 }
 
 func newAuth(password string) (*auth, error) {
@@ -52,6 +65,7 @@ func newAuth(password string) (*auth, error) {
 		salt:     make([]byte, 16),
 		sessions: map[string]time.Time{},
 		limits:   map[string]*rateEntry{},
+		trusted:  map[string]time.Time{},
 		now:      time.Now,
 	}
 	rand.Read(a.salt)
@@ -76,38 +90,73 @@ func (a *auth) check(password string) bool {
 	return err == nil && subtle.ConstantTimeCompare(h, a.hash) == 1
 }
 
-// allow reports whether ip may try to log in, and if not, how long to wait.
-func (a *auth) allow(ip string) (bool, time.Duration) {
+// begin counts a login attempt from ip before the password is checked, so
+// parallel requests cannot all pass the limit. It refuses the attempt (with
+// the time to wait) when ip has used its loginAttempts, already has a login
+// in flight, or when all IPs together have used globalAttempts. Otherwise
+// the caller must call done with the result.
+func (a *auth) begin(ip string) (bool, time.Duration) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
 	e := a.limits[ip]
-	if e == nil || now.Sub(e.start) >= loginWindow {
-		return true, 0
+	if e != nil && now.Sub(e.start) >= loginWindow {
+		e.start, e.n = now, 0
 	}
-	if e.n >= loginAttempts {
+	if e != nil && e.inflight {
+		return false, time.Second
+	}
+	if e != nil && e.n >= loginAttempts {
 		return false, e.start.Add(loginWindow).Sub(now)
 	}
-	return true, 0
-}
-
-func (a *auth) fail(ip string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := a.now()
-	if len(a.limits) > 1024 {
-		for k, e := range a.limits {
-			if now.Sub(e.start) >= loginWindow {
-				delete(a.limits, k)
+	if now.Sub(a.global.start) >= loginWindow {
+		a.global = rateEntry{start: now}
+	}
+	if _, ok := a.trusted[ip]; !ok && a.global.n >= globalAttempts {
+		return false, a.global.start.Add(loginWindow).Sub(now)
+	}
+	if e == nil {
+		// Only begun attempts add entries, and the global cap bounds those
+		// per window, so evicting stale ones keeps the map small.
+		if len(a.limits) >= 4*globalAttempts {
+			for k, x := range a.limits {
+				if !x.inflight && now.Sub(x.start) >= loginWindow {
+					delete(a.limits, k)
+				}
 			}
 		}
-	}
-	e := a.limits[ip]
-	if e == nil || now.Sub(e.start) >= loginWindow {
 		e = &rateEntry{start: now}
 		a.limits[ip] = e
 	}
 	e.n++
+	e.inflight = true
+	a.global.n++
+	return true, 0
+}
+
+// done ends the attempt started by begin. A success clears the IP's count
+// and marks it trusted.
+func (a *auth) done(ip string, ok bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if e := a.limits[ip]; e != nil {
+		e.inflight = false
+	}
+	if !ok {
+		return
+	}
+	delete(a.limits, ip)
+	now := a.now()
+	if _, known := a.trusted[ip]; !known && len(a.trusted) >= maxTrusted {
+		oldest := ""
+		for k, t := range a.trusted {
+			if oldest == "" || t.Before(a.trusted[oldest]) {
+				oldest = k
+			}
+		}
+		delete(a.trusted, oldest)
+	}
+	a.trusted[ip] = now
 }
 
 func (a *auth) newSession() string {
@@ -165,12 +214,7 @@ func setCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int)
 }
 
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
-	ip := clientIP(r)
-	if ok, wait := s.auth.allow(ip); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds()+0.999)))
-		writeErr(w, http.StatusTooManyRequests, "too many login attempts, try again later")
-		return
-	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
 	var body struct {
 		Password string `json:"password"`
 	}
@@ -178,8 +222,15 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if !s.auth.check(body.Password) {
-		s.auth.fail(ip)
+	ip := clientIP(r)
+	if ok, wait := s.auth.begin(ip); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds()+0.999)))
+		writeErr(w, http.StatusTooManyRequests, "too many login attempts, try again later")
+		return
+	}
+	ok := s.auth.check(body.Password)
+	s.auth.done(ip, ok)
+	if !ok {
 		writeErr(w, http.StatusUnauthorized, "wrong password")
 		return
 	}

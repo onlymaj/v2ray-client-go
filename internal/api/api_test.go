@@ -49,6 +49,7 @@ type env struct {
 	store  *config.Store
 	bus    *events.Bus
 	cookie *http.Cookie
+	rt     *fakeRT
 	mu     sync.Mutex
 	subs   map[string]string // url -> body for the fake fetch
 }
@@ -69,9 +70,9 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, store: st, bus: events.New(), subs: map[string]string{}}
+	e := &env{t: t, store: st, bus: events.New(), rt: &fakeRT{}, subs: map[string]string{}}
 	h, err := New(Options{
-		Store: st, Bus: e.bus, Runtime: &fakeRT{}, AdminPassword: "s3cret",
+		Store: st, Bus: e.bus, Runtime: e.rt, AdminPassword: "s3cret",
 		Web: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ui") }),
 		Fetch: func(ctx context.Context, url string) ([]byte, error) {
 			e.mu.Lock()
@@ -223,16 +224,20 @@ func TestRateLimitWindow(t *testing.T) {
 	now := time.Unix(1000, 0)
 	a.now = func() time.Time { return now }
 	for i := 0; i < loginAttempts; i++ {
-		a.fail("1.2.3.4")
+		if ok, _ := a.begin("1.2.3.4"); !ok {
+			t.Fatalf("attempt %d refused", i)
+		}
+		a.done("1.2.3.4", false)
 	}
-	if ok, wait := a.allow("1.2.3.4"); ok || wait != time.Minute {
+	if ok, wait := a.begin("1.2.3.4"); ok || wait != time.Minute {
 		t.Fatalf("ok=%v wait=%v", ok, wait)
 	}
-	if ok, _ := a.allow("5.6.7.8"); !ok {
+	if ok, _ := a.begin("5.6.7.8"); !ok {
 		t.Fatal("other IP blocked")
 	}
+	a.done("5.6.7.8", false)
 	now = now.Add(time.Minute)
-	if ok, _ := a.allow("1.2.3.4"); !ok {
+	if ok, _ := a.begin("1.2.3.4"); !ok {
 		t.Fatal("still blocked after window")
 	}
 }
@@ -452,11 +457,33 @@ func TestSettingsPasswordWriteOnly(t *testing.T) {
 		t.Fatal("not stored")
 	}
 	ros["password"] = ""
-	ros["user"] = "u"
-	e.expect("PUT", "/api/settings", raw, 200, nil)
+	ros["addressList"] = "nl"
+	ros["certSha256"] = strings.Repeat("ab", 32)
+	e.expect("PUT", "/api/settings", raw, 200, &raw)
 	st := e.store.Get().Settings.RouterOS
-	if st.Password != "rpw" || st.User != "u" {
+	if st.Password != "rpw" || st.AddressList != "nl" || st.CertSHA256 != strings.Repeat("ab", 32) {
 		t.Fatalf("kept: %+v", st)
+	}
+	e.expect("GET", "/api/settings", nil, 200, &raw)
+	ros = raw["routeros"].(map[string]any)
+	if ros["certSha256"] != strings.Repeat("ab", 32) {
+		t.Fatalf("certSha256 not returned: %v", ros)
+	}
+	// Changing the URL (or user) without a new password drops the stored
+	// one, so it is never sent to a server the admin did not enter it for.
+	ros["url"] = "http://evil.example"
+	e.expect("PUT", "/api/settings", raw, 200, &raw)
+	if st := e.store.Get().Settings.RouterOS; st.Password != "" || raw["routeros"].(map[string]any)["passwordSet"] != false {
+		t.Fatalf("password kept after url change: %+v", st)
+	}
+	ros = raw["routeros"].(map[string]any)
+	ros["password"], ros["user"] = "p2", "u"
+	e.expect("PUT", "/api/settings", raw, 200, &raw)
+	ros = raw["routeros"].(map[string]any)
+	ros["user"] = "u2"
+	e.expect("PUT", "/api/settings", raw, 200, &raw)
+	if st := e.store.Get().Settings.RouterOS; st.Password != "" || st.User != "u2" {
+		t.Fatalf("password kept after user change: %+v", st)
 	}
 	raw["healthInterval"] = 1
 	e.expect("PUT", "/api/settings", raw, 400, nil)
