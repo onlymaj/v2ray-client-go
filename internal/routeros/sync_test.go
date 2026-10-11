@@ -351,7 +351,7 @@ func TestResolveAllBounds(t *testing.T) {
 		return out, nil
 	}})
 	cache := map[string][]netip.Addr{}
-	got, err := s.resolveAll(context.Background(), []string{"many.example", "198.51.100.7"}, cache)
+	got, _, err := s.resolveAll(context.Background(), []string{"many.example", "198.51.100.7"}, cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,5 +384,49 @@ func TestResolveAllOrder(t *testing.T) {
 	}
 	if len(first) != 3 {
 		t.Fatalf("resolved names do not rotate: %v", first)
+	}
+}
+
+// Round 9: (a) one name that never resolves (common in subscription lists)
+// kept the sync in add-only mode for ever, so stale entries stayed on the
+// router; (b) the address cap was filled in resolve order, which rotates,
+// so the admin's own server could drop out of the list and entries churned.
+func TestResolveAllHoldAndStableCap(t *testing.T) {
+	s := New(Options{Resolve: func(_ context.Context, host string) ([]netip.Addr, error) {
+		if host == "dead.example" {
+			return nil, errors.New("no such host")
+		}
+		var n int
+		fmt.Sscanf(host, "h%d", &n)
+		out := make([]netip.Addr, maxAddrsPerHost)
+		for i := range out {
+			out[i] = netip.AddrFrom4([4]byte{203, byte(n >> 8), byte(n), byte(i)})
+		}
+		return out, nil
+	}})
+	cache := map[string][]netip.Addr{}
+	if _, hold, err := s.resolveAll(context.Background(), []string{"dead.example"}, cache); !hold || err == nil {
+		t.Fatal("a name that has not resolved yet must hold back removals")
+	}
+	s.firstFail["dead.example"] = time.Now().Add(-unresolvedHold - time.Minute)
+	if _, hold, err := s.resolveAll(context.Background(), []string{"dead.example"}, cache); hold || err == nil {
+		t.Fatalf("dead name after the hold: hold=%v err=%v, want the error reported without a hold", hold, err)
+	}
+
+	hosts := []string{"198.51.100.7"} // the admin's server, first in the config
+	for i := range 400 {
+		hosts = append(hosts, fmt.Sprintf("h%d.example", i))
+	}
+	var first []string
+	for pass := range 4 {
+		got, _, err := s.resolveAll(context.Background(), hosts, cache)
+		if err != nil || len(got) != maxAddrs || !slices.Contains(got, "198.51.100.7") {
+			t.Fatalf("pass %d: %d addresses, err %v, admin server kept: %v", pass, len(got), err, slices.Contains(got, "198.51.100.7"))
+		}
+		if pass == 0 {
+			first = got
+		} else if !slices.Equal(first, got) {
+			t.Fatalf("pass %d: capped set changed", pass)
+		}
 	}
 }

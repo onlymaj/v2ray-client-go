@@ -247,3 +247,16 @@ func TestConnLimitFairShare(t *testing.T) {
 		t.Fatalf("total = %d, want 4", n)
 	}
 }
+
+// Round 9: a zoned IPv6 literal from SOCKS5 or CONNECT kept its zone, so it
+// matched no dest rule (netip.Prefix.Contains is false for zoned addresses)
+// and passed the own-address refusal.
+func TestAddrDropsZone(t *testing.T) {
+	a := addr("fd00::2%x", 80)
+	if a.Domain != "" || a.IP != netip.MustParseAddr("fd00::2") {
+		t.Fatalf("addr = %+v, want the plain IP fd00::2", a)
+	}
+	if !netip.MustParsePrefix("fd00::/8").Contains(a.IP) {
+		t.Fatal("dest rules would not match the address")
+	}
+}

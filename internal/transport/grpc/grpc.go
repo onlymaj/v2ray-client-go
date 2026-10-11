@@ -77,6 +77,9 @@ type Settings struct {
 // streamWindow per round trip (10 Mbit/s at 200 ms).
 const streamWindow = 256 << 10
 
+// maxHeaderList bounds the response headers and trailers of one stream.
+const maxHeaderList = 16 << 10
+
 // StreamDialer opens tunnels as streams over a shared HTTP/2 connection.
 // dialRaw must return a connection ready to speak HTTP/2 (TLS with ALPN
 // "h2" negotiated, or cleartext with prior knowledge); it is called only
@@ -134,6 +137,9 @@ func New(settings []byte) (transport.Layer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
+	// The default lets a server send 10 MiB of response headers, kept for
+	// the life of the stream. A gRPC response needs a few hundred bytes.
+	t.MaxHeaderListSize = maxHeaderList
 	c.t = t
 	if c.ua == "" {
 		c.ua = "grpc-go/1.73.0"

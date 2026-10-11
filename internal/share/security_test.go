@@ -2,6 +2,7 @@ package share
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -81,5 +82,25 @@ func TestFieldLengthLimit(t *testing.T) {
 	}
 	if _, err := Parse("vless://" + secUUID + "@h.example.com:443?type=ws&path=/" + long[:900] + "#n"); err != nil {
 		t.Errorf("900-byte path refused: %v", err)
+	}
+}
+
+// Round 9: ParseBulk split the whole body into lines before counting
+// links, so a 4 MB body of newlines (a few KB gzipped from a subscription
+// server) allocated about 76 MB against a 32 MB memory limit.
+func TestParseBulkManyLinesIsCheap(t *testing.T) {
+	body := strings.Repeat("\n", 1<<20) + "vless://" + secUUID + "@h.example.com:443?type=tcp#last"
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	r := ParseBulk(body)
+	runtime.ReadMemStats(&after)
+	if len(r.Clients) != 1 || r.Clients[0].Name != "last" {
+		t.Fatalf("result %+v", r)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > 1<<20 {
+		t.Fatalf("allocated %d bytes for 1 MB of empty lines", n)
+	}
+	if r := ParseBulk("x://a\n\nbad://\nvless://nope"); len(r.Errors) != 1 || r.Errors[0].Line != 4 {
+		t.Fatalf("line numbers changed: %+v", r)
 	}
 }

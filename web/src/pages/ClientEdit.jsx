@@ -57,7 +57,7 @@ export function ClientEdit({ id }) {
   const del = async () => {
     const ok = await confirmDialog({
       title: `Delete ${c.name}?`,
-      description: 'The client is removed from its groups, and rules that target it change to direct.',
+      description: 'The client is removed from its groups, and rules that target it are deleted. If the default rule targets it, unmatched traffic then follows the kill switch.',
       confirm: 'Delete',
       destructive: true,
     });

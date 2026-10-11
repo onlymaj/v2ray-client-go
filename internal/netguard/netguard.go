@@ -41,7 +41,7 @@ func ResetCache() {
 // link-local, multicast, broadcast, or one of the container's own
 // addresses or its default gateway.
 func Refused(ip netip.Addr) bool {
-	ip = ip.Unmap()
+	ip = ip.WithZone("").Unmap()
 	if !ip.IsValid() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
 		ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
@@ -54,13 +54,13 @@ func Refused(ip netip.Addr) bool {
 // or its default gateway. Unlike Refused it does not match whole ranges such
 // as link-local, so it is safe for deciding which sources to trust.
 func Self(ip netip.Addr) bool {
-	ip = ip.Unmap()
+	ip = ip.WithZone("").Unmap() // a zone must not make an own address look foreign
 	selfMu.Lock()
 	defer selfMu.Unlock()
 	if selfSet == nil || time.Since(selfTime) > selfRefresh {
 		selfSet = map[netip.Addr]bool{}
 		for _, a := range SelfAddrs() {
-			selfSet[a.Unmap()] = true
+			selfSet[a.WithZone("").Unmap()] = true
 		}
 		selfTime = time.Now()
 	}

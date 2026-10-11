@@ -74,7 +74,9 @@ type Syncer struct {
 	gen    int // bumped by SetConfig / SetServers
 	status Status
 
-	pass int // resolve passes so far; used by Run's goroutine only
+	// Used by Run's goroutine only.
+	pass      int                  // resolve passes so far
+	firstFail map[string]time.Time // names that have never resolved: first failure
 }
 
 func New(opts Options) *Syncer {
@@ -148,6 +150,7 @@ func (s *Syncer) Run(ctx context.Context) {
 		resolved     = map[string][]netip.Addr{} // last good result per host
 		desired      []string
 		resolveErr   error
+		hold         bool // a resolve failure forbids removals for now
 		resolveFails int
 		nextResolve  time.Time
 
@@ -173,7 +176,7 @@ func (s *Syncer) Run(ctx context.Context) {
 		if cfg.enabled && cfg.url != "" && cfg.list != "" {
 			if gen != seenGen || !now.Before(nextResolve) {
 				seenGen = gen
-				desired, resolveErr = s.resolveAll(ctx, hosts, resolved)
+				desired, hold, resolveErr = s.resolveAll(ctx, hosts, resolved)
 				if resolveErr != nil {
 					resolveFails++
 					nextResolve = now.Add(s.backoff(resolveFails))
@@ -195,9 +198,9 @@ func (s *Syncer) Run(ctx context.Context) {
 					}
 				}
 			}
-			key := fmt.Sprint(cfg, desired, resolveErr == nil)
+			key := fmt.Sprint(cfg, desired, !hold)
 			if key != appliedKey || !now.Before(nextSync) {
-				n, err := s.reconcile(ctx, client, cfg.list, desired, resolveErr == nil)
+				n, err := s.reconcile(ctx, client, cfg.list, desired, !hold)
 				if ctx.Err() != nil {
 					return
 				}
@@ -258,12 +261,15 @@ const (
 	maxAddrsPerHost = 8
 	maxAddrs        = 2048
 	maxResolvePass  = 2 * time.Minute
+	// unresolvedHold is how long a name that has never resolved keeps
+	// entries from being removed (long enough for DNS to come up at boot).
+	unresolvedHold = 15 * time.Minute
 )
 
 // resolveAll returns the sorted, de-duplicated IPv4 addresses of hosts.
 // A host that fails to resolve keeps its last good addresses in cache so a
 // transient DNS failure does not remove it from the router.
-func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[string][]netip.Addr) ([]string, error) {
+func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[string][]netip.Addr) (addrs []string, hold bool, err error) {
 	// One pass may not take longer than this in total, or a subscription
 	// with many slow host names would keep the loop from seeing config
 	// changes for hours. Hosts not reached keep their cached addresses.
@@ -285,8 +291,12 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 		k := s.pass % n
 		known = append(known[k:n:n], known[:k]...)
 	}
+	order := hosts // config order: the admin's own clients come first
 	hosts = append(fresh, known...)
-	set := map[string]bool{}
+	if s.firstFail == nil {
+		s.firstFail = map[string]time.Time{}
+	}
+	now := time.Now()
 	var errs []error
 	seen := map[string]bool{}
 	for _, h := range hosts {
@@ -295,10 +305,7 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 			continue
 		}
 		seen[h] = true
-		if ip, err := netip.ParseAddr(h); err == nil {
-			if ip = ip.Unmap(); ip.Is4() {
-				set[ip.String()] = true
-			}
+		if _, err := netip.ParseAddr(h); err == nil {
 			continue
 		}
 		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -306,13 +313,44 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 		cancel()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("resolve %s: %w", h, err))
-			ips = cache[h]
-		} else {
-			// A host name from a subscription can resolve to thousands of
-			// addresses; each would become a firewall entry on the router.
-			slices.SortFunc(ips, netip.Addr.Compare) // which ones are kept must not vary
-			ips = ips[:min(len(ips), maxAddrsPerHost)]
-			cache[h] = ips
+			// A name with no known addresses holds back removals: its
+			// entries on the router can't be told from stale ones. But
+			// only for a while: a name that is simply dead (common in
+			// subscription lists) must not stop removals for good.
+			if _, ok := cache[h]; !ok {
+				t, failing := s.firstFail[h]
+				if !failing {
+					t = now
+					s.firstFail[h] = t
+				}
+				hold = hold || now.Sub(t) < unresolvedHold
+			}
+			continue
+		}
+		delete(s.firstFail, h)
+		// A host name from a subscription can resolve to thousands of
+		// addresses; each would become a firewall entry on the router.
+		slices.SortFunc(ips, netip.Addr.Compare) // which ones are kept must not vary
+		cache[h] = ips[:min(len(ips), maxAddrsPerHost)]
+	}
+	for h := range cache {
+		if !seen[h] {
+			delete(cache, h)
+		}
+	}
+	for h := range s.firstFail {
+		if !seen[h] {
+			delete(s.firstFail, h)
+		}
+	}
+	// Fill the capped set in config order, not in resolve order: which
+	// addresses fall outside the cap must not change from pass to pass.
+	set := map[string]bool{}
+	for _, h := range order {
+		h = strings.Trim(strings.TrimSpace(h), "[]")
+		ips := cache[h]
+		if ip, err := netip.ParseAddr(h); err == nil {
+			ips = []netip.Addr{ip}
 		}
 		for _, ip := range ips {
 			if ip = ip.Unmap(); ip.Is4() && len(set) < maxAddrs {
@@ -320,17 +358,12 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 			}
 		}
 	}
-	for h := range cache {
-		if !seen[h] {
-			delete(cache, h)
-		}
-	}
 	out := make([]string, 0, len(set))
 	for a := range set {
 		out = append(out, a)
 	}
 	slices.Sort(out)
-	return out, errors.Join(errs...)
+	return out, hold, errors.Join(errs...)
 }
 
 // normAddr turns "1.2.3.4/32" into "1.2.3.4"; other values pass through.

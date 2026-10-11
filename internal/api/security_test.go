@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -396,5 +397,51 @@ func TestFetchErrorIsClipped(t *testing.T) {
 	}
 	if got := clip(strings.Repeat("é", 200), 301); !utf8.ValidString(got) {
 		t.Fatal("clip cut a rune in half")
+	}
+}
+
+// Round 9: every address of the subscription host was pinned and exempt
+// from the public-address check. With two addresses, a same-host redirect
+// to a port closed on the first fell through to the second: a request with
+// a path the server chose, sent to an address it listed (the router, say).
+func TestFetchPinsOneAddress(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skip("127.0.0.2 not available:", err)
+	}
+	hit := make(chan string, 1)
+	target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit <- r.URL.String()
+	}))
+	target.Listener = ln
+	target.Start()
+	defer target.Close()
+	_, tport, _ := net.SplitHostPort(ln.Addr().String())
+	start := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://sub.example:"+tport+"/cgi-bin/reboot?now=1", http.StatusFound)
+	}))
+	defer start.Close()
+	_, sport, _ := net.SplitHostPort(start.Listener.Addr().String())
+
+	old := fetchLookup
+	defer func() { fetchLookup = old }()
+	fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("127.0.0.2")}, nil
+	}
+	if _, err := defaultFetch(context.Background(), "http://sub.example:"+sport+"/"); err == nil {
+		t.Error("redirect to the host's second address succeeded")
+	}
+	select {
+	case u := <-hit:
+		t.Fatalf("second address received %s", u)
+	default:
+	}
+
+	// A name answering with public and private addresses is refused outright.
+	fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.5"), netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	if _, err := defaultFetch(context.Background(), "http://sub.example:"+sport+"/"); !errors.Is(err, errRedirectBlocked) {
+		t.Fatalf("mixed public/private answer: err = %v", err)
 	}
 }

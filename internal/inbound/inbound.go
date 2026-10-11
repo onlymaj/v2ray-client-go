@@ -182,7 +182,10 @@ func srcOf(c net.Conn) netip.AddrPort {
 // addr builds a destination from a host string (IP literal or domain).
 func addr(host string, port uint16) outbound.Addr {
 	if ip, err := netip.ParseAddr(host); err == nil {
-		return outbound.Addr{IP: ip.Unmap(), Port: port}
+		// Without the zone: "fd00::2%x" is the address fd00::2, but with
+		// the zone kept it equals no address and lies in no prefix, so it
+		// would pass the own-address refusal and every dest rule.
+		return outbound.Addr{IP: ip.WithZone("").Unmap(), Port: port}
 	}
 	return outbound.Addr{Domain: host, Port: port}
 }

@@ -335,8 +335,8 @@ var fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
 
 // fetchClient returns a client for one fetch from origHost. origHost is
 // resolved once, on the first dial, and every connection to it in this
-// fetch (same-host redirects included) goes to those pinned addresses, so
-// its DNS cannot be rebound to the LAN mid-fetch. Connections to any other
+// fetch (same-host redirects included) goes to the one address the first
+// connection reached, so its DNS cannot be rebound to the LAN mid-fetch. Connections to any other
 // host must go to a public address.
 func fetchClient(origHost string) *http.Client {
 	var (
@@ -360,6 +360,12 @@ func fetchClient(origHost string) *http.Client {
 				if pinned, err = fetchLookup(ctx, host); err == nil && len(pinned) == 0 {
 					err = fmt.Errorf("no address for %s", host)
 				}
+				// A name that answers with both public and LAN addresses is
+				// the setup for reaching the LAN: refuse it. A name with
+				// only LAN addresses is a subscription the admin hosts there.
+				if err == nil && mixed(pinned) {
+					err = fmt.Errorf("%w: %s resolves to both public and private addresses", errRedirectBlocked, host)
+				}
 				if err != nil {
 					pinned = nil
 					mu.Unlock()
@@ -379,6 +385,15 @@ func fetchClient(origHost string) *http.Client {
 		for _, a := range addrs {
 			c, err := d.DialContext(ctx, network, net.JoinHostPort(a.String(), port))
 			if err == nil {
+				if same && len(addrs) > 1 {
+					// Later connections (same-host redirects, to any port)
+					// go to this address only. With the whole list pinned,
+					// a redirect to a port closed here would fall through
+					// to the next address.
+					mu.Lock()
+					pinned = []netip.Addr{a}
+					mu.Unlock()
+				}
 				return c, nil
 			}
 			last = err
@@ -411,6 +426,19 @@ func fetchClient(origHost string) *http.Client {
 			return nil
 		},
 	}
+}
+
+// mixed reports whether addrs holds both blocked and public addresses.
+func mixed(addrs []netip.Addr) bool {
+	var blocked, public bool
+	for _, a := range addrs {
+		if blockedAddr(a) {
+			blocked = true
+		} else {
+			public = true
+		}
+	}
+	return blocked && public
 }
 
 // publicOnly is a net.Dialer Control hook that refuses blocked addresses.

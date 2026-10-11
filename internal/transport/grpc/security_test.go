@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -159,5 +160,44 @@ func TestStalledReaderBuffersOneWindow(t *testing.T) {
 	}
 	if last > 2*streamWindow {
 		t.Fatalf("server sent %d bytes to a stalled stream, want about %d", last, streamWindow)
+	}
+}
+
+// Round 9: response headers were limited only by the HTTP/2 default of
+// 10 MiB, which a malicious server could make every stream hold.
+func TestLargeResponseHeadersRefused(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	h2 := &http2.Server{}
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		h2.ServeConn(c, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/grpc")
+			for i := range 64 {
+				w.Header().Set("X-Pad-"+string(rune('a'+i%26))+string(rune('a'+i/26)), strings.Repeat("x", 4<<10))
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write(encodeHunk([]byte("hello")))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		})})
+	}()
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	c, err := l.(*Client).DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+		return net.Dial("tcp", ln.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := c.Read(make([]byte, 5)); err == nil {
+		t.Fatal("stream with 256 KiB of response headers was accepted")
 	}
 }

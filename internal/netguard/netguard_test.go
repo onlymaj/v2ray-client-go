@@ -71,3 +71,21 @@ func TestSelfIsExact(t *testing.T) {
 		t.Error("Refused must still cover link-local")
 	}
 }
+
+// Round 9: an IPv6 literal with a zone ("fd00::2%x", accepted by SOCKS5 and
+// HTTP CONNECT) equals no map key, so the container's own address written
+// that way was not refused.
+func TestZonedSelfAddressRefused(t *testing.T) {
+	orig := SelfAddrs
+	SelfAddrs = func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("fd00::2")} }
+	ResetCache()
+	defer func() { SelfAddrs = orig; ResetCache() }()
+	for _, a := range []string{"fd00::2", "fd00::2%eth0", "fd00::2%x"} {
+		if ip := netip.MustParseAddr(a); !Self(ip) || !Refused(ip) {
+			t.Errorf("%s not refused", a)
+		}
+	}
+	if Refused(netip.MustParseAddr("fd00::3%eth0")) {
+		t.Error("foreign address refused")
+	}
+}

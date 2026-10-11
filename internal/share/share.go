@@ -465,7 +465,11 @@ const maxErrorText = 256
 func ParseBulk(text string) Result {
 	var r Result
 	links := 0
-	for i, line := range strings.Split(text, "\n") {
+	// Line by line without strings.Split: a 4 MB body of newlines would
+	// become 4 million string headers (64 MB) before MaxLinks is checked.
+	for i, rest, more := 0, text, true; more; i++ {
+		var line string
+		line, rest, more = strings.Cut(rest, "\n")
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue

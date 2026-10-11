@@ -50,7 +50,7 @@ export function Import() {
   const remove = async (s) => {
     const ok = await confirmDialog({
       title: `Remove ${s.name}?`,
-      description: `The ${s.count} client${s.count === 1 ? '' : 's'} imported from this subscription are deleted too.`,
+      description: `The ${s.count} client${s.count === 1 ? '' : 's'} imported from this subscription are deleted too, with the rules that target them.`,
       confirm: 'Remove',
       destructive: true,
     });
