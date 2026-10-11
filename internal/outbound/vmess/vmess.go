@@ -317,7 +317,9 @@ func (c *clientConn) Read(p []byte) (int, error) {
 	defer c.rmu.Unlock()
 	if len(c.leftover) > 0 {
 		n := copy(p, c.leftover)
-		c.leftover = c.leftover[n:]
+		if c.leftover = c.leftover[n:]; len(c.leftover) == 0 {
+			c.leftover = nil // don't pin an oversized chunk while idle
+		}
 		return n, nil
 	}
 	if c.rerr != nil {

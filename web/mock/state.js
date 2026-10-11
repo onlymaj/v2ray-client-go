@@ -403,7 +403,10 @@ export function removeClientRefs(id) {
     g.members = g.members.filter((m) => m !== id);
     if (g.current === id) g.current = '';
   }
-  db.rules = db.rules.filter((r) => !(r.target.kind === 'client' && r.target.id === id));
+  const hit = (r) => r.target.kind === 'client' && r.target.id === id;
+  const def = db.rules.findIndex((r) => r.type === 'default' && hit(r));
+  if (def >= 0) db.rules = db.rules.slice(0, def); // rules after a removed default go with it
+  db.rules = db.rules.filter((r) => !hit(r));
 }
 
 export const nowIso = () => iso(now());

@@ -70,7 +70,7 @@ The mock accepts the password `admin`.
 | POST | `/api/clients` | Client without `id`/`status`/`traffic` | `201 Client` |
 | GET | `/api/clients/:id` | — | `Client` |
 | PUT | `/api/clients/:id` | full Client (the server ignores `status`/`traffic`) | `Client` |
-| DELETE | `/api/clients/:id` | — | `204`. The server also removes the client from groups and deletes the rules that target it. Traffic those rules matched then falls through to the later rules, or to the kill switch if the default rule was one of them. |
+| DELETE | `/api/clients/:id` | — | `204`. The server also removes the client from groups and deletes the rules that target it. Traffic those rules matched then falls through to the later rules. If the default rule was one of them, the rules listed after it are deleted as well and unmatched traffic follows the kill switch. |
 | POST | `/api/clients/:id/toggle` | — | `Client` with `enabled` flipped |
 | POST | `/api/clients/:id/check` | — | `202`. Starts a health check now. The result arrives as a `ping` event (and a `status` event if the state changes). |
 | GET | `/api/clients/:id/link` | — | `{"link": "vless://..."}` (or `vmess://` base64 JSON) |

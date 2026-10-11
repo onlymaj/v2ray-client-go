@@ -8,7 +8,7 @@ Last updated: 2026-10-12. Update this file when a list item changes.
 - Image: 2.53 MiB (limit 8 MB). Binary 9.2 MiB raw, 2.5 MiB after UPX. UI 107 KB gzipped (limit 150 KB).
 - Checked on this machine only, in a network namespace: REDIRECT installs through nftables and through legacy iptables, all listeners come up, login, import, security headers and connection caps work.
 - VLESS was tested against a real Xray v26.3.27 server: Reality + Vision (chrome, firefox, safari), TLS + Vision, TLS without flow. 10 of 10 scenarios passed.
-- Security review: eight rounds of reviewers, about 85 findings, all fixed with regression tests except the ones listed under "Known limits".
+- Security review: nearly nine rounds of reviewers, about 90 findings, all fixed with regression tests except the ones listed under "Known limits".
 - Stress test (round 7): the `-race` build ran in three network namespaces (LAN clients, the app, a real Xray server with VLESS TCP, VMess TCP, VLESS WS, VMess gRPC+TLS and VLESS TLS+Vision) for 75 s under SOCKS, HTTP CONNECT, transparent, TLS-sniffed and DNS traffic with config changes and SSE logouts at the same time. No races, panics, corrupted transfers, deadlocks or leaks. Repeated for 45 s after the round-8 fixes with the same result.
 
 ## Not done yet
@@ -17,9 +17,10 @@ In the order I would do them.
 
 1. **Finish the security review loop.** The rule is: keep running rounds until one round finds nothing.
    - Round 7 is complete: its stress test found one issue (a log line for every failed DNS query), now fixed. Round 8 found 19 issues (audit of the round-7 fixes: 4, data path: 8, management plane: 7), so it does not end the loop. All are fixed except the two listed under "Known limits".
-   - Run round 9 with fresh reviewers. Have one audit the round-8 fixes, especially: `Dispatcher.Preview` / `Selector.Peek`, rules after the default rule being ignored, plain domain values matching subdomains, the settings validation in `internal/config/validate.go` (it also runs when the config file is loaded), the 256 KiB gRPC stream window, and the DNS cache variant logic in `internal/dns/msg.go`.
+   - Round 9, first reviewer (audit of the round-8 fixes): 6 low findings, all fixed. The two fresh reviewers of round 9 have not run yet.
+   - Next: fresh reviewers for the data path and the management plane, and an audit of the round-9 fixes (`Settings.repair` in `internal/config`, `RemoveClient` dropping rules after a removed default, the resolve order in `internal/routeros/sync.go`). Earlier audit focus, for reference: `Dispatcher.Preview` / `Selector.Peek`, rules after the default rule being ignored, plain domain values matching subdomains, the settings validation in `internal/config/validate.go` (it also runs when the config file is loaded), the 256 KiB gRPC stream window, and the DNS cache variant logic in `internal/dns/msg.go`.
    - Run reviewers one at a time on this machine, and tell them to run one command at a time.
-   - Findings per round so far: about 25, 14, 7, 5, 3, 4, 5, 19.
+   - Findings per round so far: about 25, 14, 7, 5, 3, 4, 5, 19, 6 (round 9 so far).
 2. **Milestone 1 on the real router.** Nothing has run on the hAP ax2 yet. Build `make probe-image`, import `dist/v2ray-probe-arm64.tar`, and confirm REDIRECT plus `SO_ORIGINAL_DST` work inside a RouterOS container. This needs router access: an SSH key on the router, then its IP and user. Test steps are in `docs/routeros.md` and in the `probe/main.go` header.
 3. **Interop test suite.** `make interop` has a target but `test/interop/` holds only reference files (`testdata/xray-vless.json`, `testdata/harness.go.txt`). Still never tested against a real server: VMess (all ciphers), WebSocket, gRPC (Tun and TunMulti), VLESS over plain TCP, and the Reality fallback path.
 4. **Measure on the device.** RSS against the 20 MB target, and the image size after import. On amd64 the unpacked binary with `GOMEMLIMIT=32MiB` used 34 MB RSS at start and 41 MB under the stress load, without growing. A busy connection costs about 50 KB, plus up to 256 KB for a stalled gRPC stream. Known risk: right after a login the binary used about 50 MB on amd64, mostly the 16 MB scrypt buffer. If it matters on the router, halve the scrypt cost in `internal/api/auth.go`.

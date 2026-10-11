@@ -73,6 +73,8 @@ type Syncer struct {
 	hosts  []string
 	gen    int // bumped by SetConfig / SetServers
 	status Status
+
+	pass int // resolve passes so far; used by Run's goroutine only
 }
 
 func New(opts Options) *Syncer {
@@ -267,6 +269,23 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 	// changes for hours. Hosts not reached keep their cached addresses.
 	ctx, cancelAll := context.WithTimeout(ctx, maxResolvePass)
 	defer cancelAll()
+	// The deadline can end a pass early. Names never resolved go first and
+	// the rest start one further on each pass, so the same names at the end
+	// of the list are not the ones skipped every time.
+	s.pass++
+	var fresh, known []string
+	for _, h := range hosts {
+		if _, ok := cache[strings.Trim(strings.TrimSpace(h), "[]")]; ok {
+			known = append(known, h)
+		} else {
+			fresh = append(fresh, h)
+		}
+	}
+	if n := len(known); n > 0 {
+		k := s.pass % n
+		known = append(known[k:n:n], known[:k]...)
+	}
+	hosts = append(fresh, known...)
 	set := map[string]bool{}
 	var errs []error
 	seen := map[string]bool{}

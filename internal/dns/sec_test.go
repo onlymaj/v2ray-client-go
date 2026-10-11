@@ -513,9 +513,10 @@ func TestCacheVariant(t *testing.T) {
 		{"plain", plain, "", true},
 		{"no edns", buildQuery(1, "cdn.example", typeA, 0), "", true},
 		{"do", withOpt(1<<15, nil), "|do", true},
-		{"cookie", withOpt(0, []byte{0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8}), "", true},
+		{"cookie", withOpt(0, []byte{0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8}), "", false}, // round 9
+		{"padding", withOpt(0, []byte{0, 12, 0, 2, 0, 0}), "", true},
 		{"ecs", withOpt(0, []byte{0, 8, 0, 7, 0, 1, 24, 0, 203, 0, 113}), "", false},
-		{"ecs after cookie", withOpt(0, []byte{0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 8, 0, 4, 0, 1, 0, 0}), "", false},
+		{"ecs after padding", withOpt(0, []byte{0, 12, 0, 2, 0, 0, 0, 8, 0, 4, 0, 1, 0, 0}), "", false},
 		{"bad option length", withOpt(0, []byte{0, 10, 0, 9, 1}), "", false},
 		{"cd", cd, "", false},
 	} {

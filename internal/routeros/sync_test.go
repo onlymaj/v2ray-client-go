@@ -359,3 +359,30 @@ func TestResolveAllBounds(t *testing.T) {
 		t.Fatalf("kept %d addresses (%d cached), want %d per host", len(got), len(cache["many.example"]), maxAddrsPerHost)
 	}
 }
+
+// Round 9: with the pass deadline from round 8, names at the end of the
+// list were skipped on every pass when the ones before them were slow.
+// Names never resolved go first, and the rest rotate.
+func TestResolveAllOrder(t *testing.T) {
+	var order []string
+	s := New(Options{Resolve: func(_ context.Context, host string) ([]netip.Addr, error) {
+		order = append(order, host)
+		return []netip.Addr{netip.MustParseAddr("203.0.113.1")}, nil
+	}})
+	cache := map[string][]netip.Addr{}
+	hosts := []string{"a", "b", "c"}
+	s.resolveAll(context.Background(), hosts, cache)
+	first := map[string]bool{}
+	for range 3 {
+		order = nil
+		s.resolveAll(context.Background(), append(hosts, "new"), cache)
+		if order[0] != "new" {
+			t.Fatalf("unresolved name not first: %v", order)
+		}
+		delete(cache, "new")
+		first[order[1]] = true
+	}
+	if len(first) != 3 {
+		t.Fatalf("resolved names do not rotate: %v", first)
+	}
+}

@@ -292,9 +292,10 @@ func errorResponse(query []byte, rcode int) []byte {
 
 // cacheVariant looks at what in query, beyond the question, changes the
 // answer. shared is false when the answer is specific to this query and
-// must not be cached for other clients: checking disabled (CD), or an EDNS
+// must not be cached for other clients: checking disabled (CD), an EDNS
 // Client Subnet option (RFC 7871), which lets the sender choose the network
-// the answer is tailored to. variant separates answers with and without
+// the answer is tailored to, or a COOKIE option (RFC 7873), which the
+// upstream echoes and another client would reject. variant separates answers with and without
 // DNSSEC records (the DO bit).
 func cacheVariant(query []byte, h header, q question) (variant string, shared bool) {
 	if h.Flags&flagCD != 0 {
@@ -312,7 +313,7 @@ func cacheVariant(query []byte, h header, q question) (variant string, shared bo
 			variant = "|do"
 		}
 		for opt := query[r.RDataOff : r.RDataOff+r.RDLen]; len(opt) >= 4; {
-			if binary.BigEndian.Uint16(opt) == 8 { // edns-client-subnet
+			if code := binary.BigEndian.Uint16(opt); code == 8 || code == 10 { // client subnet, cookie
 				return "", false
 			}
 			n := 4 + int(binary.BigEndian.Uint16(opt[2:]))

@@ -231,18 +231,24 @@ export function mockApi() {
             if (!Number.isInteger(v) || v < min || v > 65535) throw bad(`ports.${k} must be ${min}-65535`);
             p[k] = v;
           }
+          const usedPorts = Object.values(p).filter((v) => v !== 0);
+          if (new Set(usedPorts).size !== usedPorts.length) throw bad('ports must differ');
           const iv = Number(b.healthInterval);
           if (!Number.isInteger(iv) || iv < 5 || iv > 3600) throw bad('healthInterval must be 5-3600 seconds');
           if (!['block', 'direct'].includes(b.killSwitch)) throw bad('killSwitch must be block or direct');
-          try {
-            new URL(b.healthUrl);
-          } catch {
-            throw bad('healthUrl is invalid');
+          if (b.healthUrl) { // "" selects the default
+            let u;
+            try {
+              u = new URL(b.healthUrl);
+            } catch {
+              throw bad('healthUrl must be an http or https URL');
+            }
+            if (!['http:', 'https:'].includes(u.protocol)) throw bad('healthUrl must be an http or https URL');
           }
           const m = String(b.dnsUpstream || '').match(/^(\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\]):(\d{1,5})$/);
           if (!m || Number(m[2]) < 1 || Number(m[2]) > 65535) throw bad('dnsUpstream must be ip:port');
           const r = b.routeros || {};
-          if (r.certSha256 && !/^[0-9a-fA-F]{64}$/.test(String(r.certSha256).replace(/[: ]/g, ''))) throw bad('routeros.certSha256 must be 64 hex characters');
+          if (r.certSha256 && !/^[0-9a-fA-F]{64}$/.test(String(r.certSha256).replace(/:/g, ''))) throw bad('routeros.certSha256 must be 64 hex characters');
           const prev = db.settings.routeros;
           db.settings = {
             ports: p, healthUrl: b.healthUrl, healthInterval: iv, killSwitch: b.killSwitch, dnsUpstream: b.dnsUpstream,

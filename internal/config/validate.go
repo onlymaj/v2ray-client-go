@@ -87,6 +87,33 @@ func (c *Config) Validate() error {
 // validate refuses settings the listeners, the health checker or the DNS
 // forwarder could not use. A clash between ports would stop the next start
 // with the UI unreachable, so it must never be saved.
+// repair replaces settings that validate refuses with their defaults and
+// returns what it changed. Open uses it: a config file written before these
+// checks existed must not stop the start, which would leave the UI
+// unreachable and the LAN without a proxy.
+func (s *Settings) repair() []string {
+	var fixed []string
+	def := Default().Settings
+	for range 4 { // each pass fixes the one field validate complains about
+		err := s.validate()
+		if err == nil {
+			break
+		}
+		switch msg := err.Error(); {
+		case strings.HasPrefix(msg, "healthInterval"):
+			s.HealthInterval = def.HealthInterval
+		case strings.HasPrefix(msg, "ports"):
+			s.Ports = def.Ports
+		case strings.HasPrefix(msg, "dnsUpstream"):
+			s.DNSUpstream = def.DNSUpstream
+		case strings.HasPrefix(msg, "healthUrl"):
+			s.HealthURL = def.HealthURL
+		}
+		fixed = append(fixed, err.Error())
+	}
+	return fixed
+}
+
 func (s *Settings) validate() error {
 	if s.HealthInterval < 5 || s.HealthInterval > 3600 {
 		return errors.New("healthInterval must be 5-3600 seconds")
@@ -126,7 +153,8 @@ func (s *Settings) validate() error {
 }
 
 // RemoveClient deletes a client and every reference to it (group members,
-// rules that target it).
+// rules that target it). If the default rule targets it, the rules listed
+// after the default rule are deleted too.
 func (c *Config) RemoveClient(id string) {
 	out := c.Clients[:0]
 	for _, cl := range c.Clients {
@@ -148,6 +176,12 @@ func (c *Config) RemoveClient(id string) {
 	for _, r := range c.Rules {
 		if !(r.Target.Kind == router.KindClient && r.Target.ID == id) {
 			rules = append(rules, r)
+			continue
+		}
+		if r.Type == "default" {
+			// Rules after the default rule never matched. Without the
+			// default they would come to life, so they go with it.
+			break
 		}
 	}
 	c.Rules = rules
