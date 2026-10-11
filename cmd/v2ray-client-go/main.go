@@ -119,7 +119,9 @@ func run() error {
 		// arrive from the gateway: give it (and the container itself) a much
 		// higher per-source budget than a single LAN device.
 		SourceLimit: func(src netip.Addr) (int, int) {
-			if netguard.Refused(src) {
+			// Exact gateway/own addresses only: Refused would also match
+			// ranges such as 169.254.0.0/16 that any LAN device can use.
+			if netguard.Self(src) {
 				return 256, -1 // no UDP rate limit; docs drop forged 172.17.0.0/24 sources
 			}
 			return 0, 0 // defaults

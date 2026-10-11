@@ -6,7 +6,7 @@ import "testing"
 func TestValidateRejectsBadAddressAndControlChars(t *testing.T) {
 	for _, link := range []string{
 		"vless://11111111-2222-3333-4444-555555555555@::1", // unbracketed IPv6 parsed as ":" port 1
-		"vless://%00@example.com:443",                          // NUL id
+		"vless://%00@example.com:443",                      // NUL id
 		"vless://11111111-2222-3333-4444-555555555555@ex%00ample.com:443",
 		"vless://11111111-2222-3333-4444-555555555555@example.com:443?flow=a%0Ab",
 		"vless://11111111-2222-3333-4444-555555555555@example.com:443?fp=%07",

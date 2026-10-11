@@ -47,6 +47,14 @@ func Refused(ip netip.Addr) bool {
 		ip == netip.AddrFrom4([4]byte{255, 255, 255, 255}) {
 		return true
 	}
+	return Self(ip)
+}
+
+// Self reports whether ip is exactly one of the container's own addresses
+// or its default gateway. Unlike Refused it does not match whole ranges such
+// as link-local, so it is safe for deciding which sources to trust.
+func Self(ip netip.Addr) bool {
+	ip = ip.Unmap()
 	selfMu.Lock()
 	defer selfMu.Unlock()
 	if selfSet == nil || time.Since(selfTime) > selfRefresh {
