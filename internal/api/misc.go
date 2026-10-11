@@ -123,6 +123,11 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-tick.C:
+			// The session was checked when the stream opened; end the
+			// stream once it is logged out or expires.
+			if !s.auth.alive(r) {
+				return
+			}
 			_, err = w.Write([]byte(": hb\n\n"))
 		case e, ok := <-ch:
 			if !ok {

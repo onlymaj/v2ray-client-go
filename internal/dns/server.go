@@ -50,9 +50,20 @@ import (
 // a connection from src to qname would be.
 type DialFunc func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, error)
 
+// DialKeyedFunc is DialFunc that also returns the route key (in RouteKey's
+// format) of the route the connection actually took.
+type DialKeyedFunc func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, string, error)
+
 type Options struct {
-	Dial     DialFunc
-	Upstream string // ip:port or host:port; port defaults to 53
+	Dial DialFunc
+	// DialKeyed, if set, is used instead of Dial. The server pools the
+	// connection and caches the answer only when the returned key equals
+	// the key the query was routed under, so a route change between
+	// RouteKey and the dial (e.g. the kill switch flipping to direct) can't
+	// leave a direct connection pooled, or an answer cached, under a
+	// proxied route.
+	DialKeyed DialKeyedFunc
+	Upstream  string // ip:port or host:port; port defaults to 53
 
 	// RouteKey, if set, returns a key identifying the route Dial would
 	// take for (src, qname) to the upstream address dst. It must route
@@ -99,8 +110,12 @@ type Server struct {
 
 type idleConn struct {
 	conn  net.Conn
-	since time.Time
+	since time.Time // last use
+	born  time.Time // dial time
 }
+
+// maxPooledAge caps how long one upstream connection is reused.
+const maxPooledAge = 60 * time.Second
 
 func New(opts Options) *Server {
 	if opts.MaxInFlight <= 0 {
@@ -383,12 +398,14 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 		return errorResponse(query, rcodeServFail) // not logged: a flood would fill the log
 	}
 	defer s.queries.release(src)
-	resp, err := s.exchange(ctx, src, query, q, up, upErr, key)
+	resp, cacheable, err := s.exchange(ctx, src, query, q, up, upErr, key)
 	if err != nil {
 		s.opts.Logf("dns: %s %s from %s: %v", q.Name, typeString(q.Type), src, err)
 		return errorResponse(query, rcodeServFail)
 	}
-	s.cache.put(q, key, resp)
+	if cacheable {
+		s.cache.put(q, key, resp)
+	}
 	return resp
 }
 
@@ -415,45 +432,67 @@ func (s *Server) Exchange(ctx context.Context, src netip.Addr, query []byte) ([]
 		return nil, err
 	}
 	up, upErr := s.upstreamAddr()
-	return s.exchange(ctx, src, query, q, up, upErr, s.routeKey(src, q.Name, up))
+	resp, _, err := s.exchange(ctx, src, query, q, up, upErr, s.routeKey(src, q.Name, up))
+	return resp, err
 }
 
 // exchange is Exchange with the question, upstream and route key already
 // worked out.
-func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q question, up outbound.Addr, upErr error, key string) ([]byte, error) {
+func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q question, up outbound.Addr, upErr error, key string) (resp []byte, cacheable bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.opts.Timeout)
 	defer cancel()
 	select {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
 	case <-ctx.Done():
-		return nil, fmt.Errorf("waiting for a free upstream slot: %w", ctx.Err())
+		return nil, false, fmt.Errorf("waiting for a free upstream slot: %w", ctx.Err())
 	}
 
 	if upErr != nil {
-		return nil, upErr
+		return nil, false, upErr
 	}
 
 	// A pooled connection may have been closed by the upstream; retry
 	// once on a fresh one.
-	if c := s.takeIdle(key); c != nil {
-		if resp, err := exchangeOn(ctx, c, query); err == nil {
-			s.putIdle(key, c)
-			return resp, nil
+	if ic, ok := s.takeIdle(key); ok {
+		if resp, err := exchangeOn(ctx, ic.conn, query); err == nil {
+			s.putIdle(key, ic.conn, ic.born)
+			return resp, true, nil
 		}
-		c.Close()
+		ic.conn.Close()
 	}
-	c, err := s.opts.Dial(ctx, src, strings.ToLower(q.Name), up)
+	c, dialKey, err := s.dial(ctx, src, q.Name, up)
 	if err != nil {
-		return nil, fmt.Errorf("dial upstream %s: %w", up, err)
+		return nil, false, fmt.Errorf("dial upstream %s: %w", up, err)
 	}
-	resp, err := exchangeOn(ctx, c, query)
+	resp, err = exchangeOn(ctx, c, query)
 	if err != nil {
 		c.Close()
-		return nil, fmt.Errorf("upstream %s: %w", up, err)
+		return nil, false, fmt.Errorf("upstream %s: %w", up, err)
 	}
-	s.putIdle(key, c)
-	return resp, nil
+	if dialKey != key {
+		// The route changed between keying and dialing: answer this query
+		// but neither pool the connection nor cache the answer under key.
+		c.Close()
+		return resp, false, nil
+	}
+	s.putIdle(key, c, time.Now())
+	return resp, true, nil
+}
+
+// dial opens an upstream connection and returns the route key it took.
+// With plain Dial the key is recomputed right after dialing.
+func (s *Server) dial(ctx context.Context, src netip.Addr, qname string, up outbound.Addr) (net.Conn, string, error) {
+	qname = strings.ToLower(qname)
+	if s.opts.DialKeyed != nil {
+		c, k, err := s.opts.DialKeyed(ctx, src, qname, up)
+		if err != nil || s.opts.RouteKey == nil {
+			return c, "", err
+		}
+		return c, k + "|" + up.String(), nil
+	}
+	c, err := s.opts.Dial(ctx, src, qname, up)
+	return c, s.routeKey(src, qname, up), err
 }
 
 func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
@@ -499,32 +538,35 @@ func answers(query []byte, q question, resp []byte) bool {
 	return err == nil && keyOf(rq) == keyOf(q)
 }
 
-func (s *Server) takeIdle(key string) net.Conn {
+func (s *Server) takeIdle(key string) (idleConn, bool) {
 	if key == "" {
-		return nil
+		return idleConn{}, false
 	}
 	s.mu.Lock()
 	ic, ok := s.idle[key]
 	delete(s.idle, key)
 	s.mu.Unlock()
 	if !ok {
-		return nil
+		return idleConn{}, false
 	}
-	if time.Since(ic.since) > s.opts.IdleTimeout {
+	if time.Since(ic.since) > s.opts.IdleTimeout || time.Since(ic.born) > maxPooledAge {
 		ic.conn.Close()
-		return nil
+		return idleConn{}, false
 	}
-	return ic.conn
+	return ic, true
 }
 
-func (s *Server) putIdle(key string, c net.Conn) {
+// putIdle pools c under key. born is when c was dialed: a pooled
+// connection is retired maxPooledAge after it was opened however often it
+// is reused, so a route or server change is picked up within that time.
+func (s *Server) putIdle(key string, c net.Conn, born time.Time) {
 	if key == "" {
 		c.Close()
 		return
 	}
 	s.mu.Lock()
 	old, had := s.idle[key]
-	s.idle[key] = idleConn{c, time.Now()}
+	s.idle[key] = idleConn{conn: c, since: time.Now(), born: born}
 	s.mu.Unlock()
 	if had {
 		old.conn.Close()

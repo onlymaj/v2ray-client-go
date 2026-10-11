@@ -217,6 +217,20 @@ func (a *auth) valid(r *http.Request) bool {
 	return true
 }
 
+// alive reports whether the session r carries is still valid for r's IP,
+// without counting as use (so a long-lived SSE stream doesn't keep the
+// session from reaching its idle timeout).
+func (a *auth) alive(r *http.Request) bool {
+	c, err := r.Cookie(cookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.sessions[c.Value]
+	return ok && !e.expired(a.now()) && e.ip == clientIP(r)
+}
+
 // drop ends the session r carries, but only for a request from the IP the
 // session is bound to: like valid, a stolen copy cannot log the owner out.
 func (a *auth) drop(r *http.Request) {

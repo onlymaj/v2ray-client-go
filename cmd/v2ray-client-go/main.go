@@ -97,23 +97,15 @@ func run() error {
 
 	dnsSrv := dns.New(dns.Options{
 		Upstream: cfg.Settings.DNSUpstream,
-		Dial: func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, error) {
-			// Route by the query name, but connect to the upstream itself.
-			c, _, err := d.DialRouted(ctx, src, qname, dst)
-			return c, err
+		// Route by the query name, but connect to the upstream itself. The
+		// returned key is that of the route actually taken, so the server
+		// won't pool or cache under a key whose route changed meanwhile.
+		DialKeyed: func(ctx context.Context, src netip.Addr, qname string, dst outbound.Addr) (net.Conn, string, error) {
+			c, dec, err := d.DialRouted(ctx, src, qname, dst)
+			return c, dnsRouteKey(dec), err
 		},
-		// Cached answers and pooled upstream conns are shared only by queries
-		// that take the same route to this upstream. Group routes are keyed
-		// by group, not by the member Pick chose: every member may carry that
-		// traffic, and keying by member would split the cache and let a
-		// round-robin key differ from the member Dial uses.
 		RouteKey: func(src netip.Addr, qname string, dst netip.Addr) string {
-			r := d.Route(src, qname, dst)
-			target := r.ClientID
-			if r.GroupID != "" {
-				target = "g:" + r.GroupID
-			}
-			return r.RuleID + "|" + r.Kind + "|" + target
+			return dnsRouteKey(d.Route(src, qname, dst))
 		},
 		// Under DNS Option B the router forwards every LAN query, so they all
 		// arrive from the gateway: give it (and the container itself) a much
@@ -279,6 +271,20 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// dnsRouteKey identifies a DNS route for the forwarder's cache and
+// connection pool. Group routes are keyed by group, not by the member Pick
+// chose: every member may carry that traffic, and keying by member would
+// split the cache and let a round-robin key differ from the member Dial
+// uses. Kind is included, so a kill-switch "direct" decision never shares a
+// key with the proxied route.
+func dnsRouteKey(r dispatch.Decision) string {
+	target := r.ClientID
+	if r.GroupID != "" {
+		target = "g:" + r.GroupID
+	}
+	return r.RuleID + "|" + r.Kind + "|" + target
 }
 
 func envOr(k, def string) string {
