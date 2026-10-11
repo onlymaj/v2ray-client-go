@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/onlymaj/v2ray-client-go/internal/client"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/sniff"
 )
@@ -93,15 +94,24 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 	if dec.Kind == KindBlock {
 		return
 	}
+	var cli *client.Client
+	if e := d.st.Load().clients[dec.ClientID]; e != nil {
+		cli = e.c
+	}
 	out, err := d.dial(ctx, dec, domain, dst)
 	cancel()
 	if err != nil {
 		return
 	}
 	defer out.Close()
-	ar := &activeRelay{src: src.Addr(), domain: domain, dstIP: dst.IP, dec: dec, in: conn, out: out}
+	ar := &activeRelay{src: src.Addr(), domain: domain, dstIP: dst.IP, dec: dec, cli: cli, in: conn, out: out}
 	d.relays.add(ar)
 	defer d.relays.remove(ar)
+	// A config change during the dial ran its recheck before this relay was
+	// registered; check it now against the current state.
+	if routeChanged(ar, d.Route(src.Addr(), domain, dst.IP), d.st.Load()) {
+		return
+	}
 	if len(head) > 0 {
 		if _, err := out.Write(head); err != nil {
 			return

@@ -18,9 +18,9 @@ func register(t *testing.T, d *Dispatcher, domain string, dst netip.Addr) (Decis
 	inA, inB := net.Pipe()
 	outA, outB := net.Pipe()
 	t.Cleanup(func() { inA.Close(); inB.Close(); outA.Close(); outB.Close() })
-	d.relays.add(&activeRelay{src: lan, domain: domain, dstIP: dst, dec: dec, in: inA, out: outA})
+	d.relays.add(&activeRelay{src: lan, domain: domain, dstIP: dst, dec: dec, cli: d.Client(dec.ClientID), in: inA, out: outA})
 	return dec, func() bool {
-		inB.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		inB.SetReadDeadline(time.Now().Add(300 * time.Millisecond)) // cut() closes in the background
 		_, err := inB.Read(make([]byte, 1))
 		return err != nil && !isTimeout(err)
 	}
@@ -97,5 +97,42 @@ func TestRelayKeptWhenRouteUnchanged(t *testing.T) {
 	d.HealthUpdate("b", true, time.Millisecond)
 	if cut() {
 		t.Fatal("unchanged relay was cut")
+	}
+}
+
+// Regression (round 7): editing a client (same ID, new server) must cut
+// relays on the old server, and so must removing a member from its group.
+func TestRelayCutWhenClientEditedOrRemovedFromGroup(t *testing.T) {
+	d, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	d.HealthUpdate("a", true, time.Millisecond)
+	_, cutDirectRule := register(t, d, "", netip.MustParseAddr("1.2.3.4")) // rule r-a -> client a
+	_, cutGroup := register(t, d, "any.test", other)                       // default -> group g1 -> a
+
+	edited := testConfig()
+	edited.Clients[0].Address = "127.0.0.2" // client a moves to another server
+	if err := d.Update(edited); err != nil {
+		t.Fatal(err)
+	}
+	if !cutDirectRule() {
+		t.Fatal("relay to the edited client's old server survived")
+	}
+	if !cutGroup() {
+		t.Fatal("group relay on the edited client survived")
+	}
+
+	d.HealthUpdate("a", true, time.Millisecond)
+	_, cutGroup2 := register(t, d, "any.test", other)
+	removed := testConfig()
+	removed.Clients[0].Address = "127.0.0.2"
+	removed.Groups[0].Members = []string{"b"} // a leaves g1 but stays enabled
+	if err := d.Update(removed); err != nil {
+		t.Fatal(err)
+	}
+	if !cutGroup2() {
+		t.Fatal("relay through a client removed from its group survived")
 	}
 }

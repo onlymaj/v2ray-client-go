@@ -330,6 +330,11 @@ func (c *Conn) Write(p []byte) (int, error) {
 func (c *Conn) writeFrame(op byte, p []byte) error {
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	return c.writeFrameLocked(op, p)
+}
+
+// writeFrameLocked is writeFrame with wmu already held.
+func (c *Conn) writeFrameLocked(op byte, p []byte) error {
 	if c.closed {
 		return net.ErrClosed
 	}
@@ -362,9 +367,19 @@ func (c *Conn) writeFrame(op byte, p []byte) error {
 	return err
 }
 
-// Close sends a 1000 (normal closure) close frame and closes the connection.
+// Close sends a 1000 (normal closure) close frame when it can do so without
+// waiting, then closes the connection. If a Write is stuck holding the frame
+// lock (a stalled peer), it closes the underlying conn directly, which also
+// unblocks that Write: Close must never hang (relays are closed from config
+// updates).
 func (c *Conn) Close() error {
-	c.writeFrame(opClose, []byte{0x03, 0xE8})
+	if c.wmu.TryLock() {
+		if !c.closed {
+			c.Conn.SetWriteDeadline(time.Now().Add(time.Second))
+			c.writeFrameLocked(opClose, []byte{0x03, 0xE8})
+		}
+		c.wmu.Unlock()
+	}
 	return c.Conn.Close()
 }
 
