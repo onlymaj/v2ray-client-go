@@ -7,6 +7,7 @@ import { Card, CardHeader, CardTitle } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Switch } from '../components/ui/switch';
 import { navigate, uuid } from '../util.js';
+import { unencrypted, UNENCRYPTED_HINT } from './Clients.jsx';
 
 const blank = {
   name: '', enabled: true, protocol: 'vless', address: '', port: 443, uuid: '', flow: '', security: 'none',
@@ -127,6 +128,7 @@ export function ClientEdit({ id }) {
           <Field label="Security">
             <SimpleSelect value={c.tls} options={vless ? ['none', 'tls', 'reality'] : ['none', 'tls']} onChange={set('tls')} />
           </Field>
+          {unencrypted(c) && <Alert variant="destructive" className="sm:col-span-2"><b>Unencrypted.</b> {UNENCRYPTED_HINT}</Alert>}
           {c.tls !== 'none' && (
             <>
               <Field label="SNI">{inp('sni', { autoCapitalize: 'off', spellCheck: false })}</Field>

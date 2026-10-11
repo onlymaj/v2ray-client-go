@@ -15,15 +15,23 @@ import { fmtRate, fmtMs } from '../util.js';
 export const transport = (c) => [c.protocol, c.network, c.tls !== 'none' && c.tls, c.flow && 'vision'].filter(Boolean).join(' · ');
 
 const INSECURE_HINT = 'Certificate verification is off: anyone on the network path can intercept this connection and read the traffic.';
+/**
+ * True when nothing encrypts the traffic to the server: VLESS has no
+ * encryption of its own, and VMess with cipher none/zero doesn't either.
+ */
+export const unencrypted = (c) =>
+  c.tls === 'none' && (c.protocol === 'vless' || ['none', 'zero'].includes(c.security));
+export const UNENCRYPTED_HINT = 'No transport encryption: anyone on the network path (ISP, censor) can read this traffic and, for VLESS, change where connections go.';
 /** Why an untrusted client is restricted and how to lift it. */
 export const untrustedHint = (c) =>
   c.subscriptionId
     ? 'From a subscription: private/LAN server addresses are blocked unless "Allow untrusted servers on private/LAN addresses" is on in Settings.'
     : 'Imported from a link: private/LAN server addresses are blocked. Save the client in the editor to trust it.';
 
-/** "insecure" and "untrusted" badges, with an explanation on hover. */
+/** "unencrypted", "insecure" and "untrusted" badges, with an explanation on hover. */
 export const TrustBadges = ({ c }) => (
   <>
+    {unencrypted(c) && <Badge variant="destructive" title={UNENCRYPTED_HINT}>unencrypted</Badge>}
     {c.tls === 'tls' && c.allowInsecure && <Badge variant="destructive" title={INSECURE_HINT}>insecure</Badge>}
     {c.untrusted && <Badge variant="outline" title={untrustedHint(c)}>untrusted</Badge>}
   </>

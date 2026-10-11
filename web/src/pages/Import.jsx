@@ -8,6 +8,7 @@ import { Card, CardDescription, CardHeader, CardTitle } from '../components/ui/c
 import { Input } from '../components/ui/input';
 import { Textarea } from '../components/ui/textarea';
 import { fmtAgo } from '../util.js';
+import { unencrypted, UNENCRYPTED_HINT } from './Clients.jsx';
 
 export function Import() {
   const [text, setText] = useState('');
@@ -78,7 +79,12 @@ export function Import() {
             </p>
             {result.added.length > 0 && (
               <div className="flex flex-wrap gap-x-3 gap-y-1">
-                {result.added.map((c) => <a key={c.id} href={`#/clients/${c.id}`} className="underline">{c.name}</a>)}
+                {result.added.map((c) => (
+                  <span key={c.id} className="inline-flex items-center gap-1">
+                    <a href={`#/clients/${c.id}`} className="underline">{c.name}</a>
+                    {unencrypted(c) && <Badge variant="destructive" title={UNENCRYPTED_HINT}>unencrypted</Badge>}
+                  </span>
+                ))}
               </div>
             )}
             {result.errors.map((e) => (

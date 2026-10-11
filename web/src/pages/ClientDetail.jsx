@@ -10,7 +10,7 @@ import { Card, CardAction, CardDescription, CardHeader, CardTitle } from '../com
 import { Switch } from '../components/ui/switch';
 import { Tabs, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { fmtRate, fmtMs, fmtAgo, fmtBytes } from '../util.js';
-import { transport, TrustBadges, untrustedHint } from './Clients.jsx';
+import { transport, TrustBadges, untrustedHint, unencrypted, UNENCRYPTED_HINT } from './Clients.jsx';
 import { Stat } from './Dashboard.jsx';
 
 const delaySeries = [{ label: 'Delay', color: '--info' }];
@@ -70,6 +70,9 @@ export function ClientDetail({ id }) {
         <Stat label="Upload" value={fmtRate(r.upRate)} className="text-warning" />
       </div>
 
+      {unencrypted(c) && (
+        <Alert variant="destructive"><b>Unencrypted.</b> {UNENCRYPTED_HINT} Use TLS or Reality for this server if it supports it.</Alert>
+      )}
       {c.tls === 'tls' && c.allowInsecure && (
         <Alert variant="destructive"><b>Certificate verification is off.</b> Anyone on the network path can intercept this connection and read the traffic. Turn off "Allow insecure" in the editor unless you trust every network in between.</Alert>
       )}

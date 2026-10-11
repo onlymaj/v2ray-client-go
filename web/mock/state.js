@@ -26,7 +26,7 @@ const seedClients = [
   { ...blankClient(), name: 'AM VMess WS', protocol: 'vmess', address: '217.76.14.90', port: 8443, network: 'ws',
     security: 'auto', tls: 'tls', sni: 'am.relaybox.org', host: 'am.relaybox.org', path: '/vm', untrusted: true },
   { ...blankClient(), name: 'FR VMess plain', protocol: 'vmess', address: '51.38.112.4', port: 8080, network: 'ws',
-    security: 'aes-128-gcm', path: '/', host: '' },
+    security: 'none', path: '/', host: '' }, // plaintext example: shows the "unencrypted" badge
   reality({ name: 'UAE Reality', address: '5.182.36.201', sni: 'www.apple.com', fingerprint: 'safari' }),
   { ...blankClient(), name: 'Old backup', protocol: 'vmess', address: '103.21.244.9', port: 443, network: 'tcp',
     security: 'auto', tls: 'tls', sni: 'old.backup.example', enabled: false },
