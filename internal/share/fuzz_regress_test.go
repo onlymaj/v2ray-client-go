@@ -34,3 +34,15 @@ func TestIPv6LinkRoundTrip(t *testing.T) {
 		t.Fatalf("exported link %q does not parse: %v", link, err)
 	}
 }
+
+// Regression (round 5): invalid UTF-8 would be changed to U+FFFD on export.
+func TestValidateRejectsInvalidUTF8(t *testing.T) {
+	for _, link := range []string{
+		"vless://11111111-2222-3333-4444-555555555555@example.com:443#%ff",
+		"vless://11111111-2222-3333-4444-555555555555@example.com:443?security=tls&fp=%ff",
+	} {
+		if _, err := Parse(link); err == nil {
+			t.Errorf("Parse(%q) accepted invalid UTF-8", link)
+		}
+	}
+}

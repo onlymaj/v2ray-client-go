@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/net/http/httpguts"
 )
@@ -110,6 +111,15 @@ func (c *Client) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported security %q", c.TLS)
+	}
+	// Every string must be valid UTF-8: JSON export (vmess links, the API)
+	// would otherwise silently replace bytes and change the client.
+	for _, v := range append([]string{c.Name, c.Protocol, c.Address, c.ID, c.Flow, c.Security, c.Encryption,
+		c.Network, c.TLS, c.SNI, c.Fingerprint, c.PublicKey, c.ShortID, c.SpiderX, c.Path, c.Host,
+		c.ServiceName, c.Authority}, c.ALPN...) {
+		if !utf8.ValidString(v) {
+			return errors.New("invalid UTF-8 in link")
+		}
 	}
 	if !validAddress(c.Address) {
 		return fmt.Errorf("invalid address %q", c.Address)
