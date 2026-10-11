@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -110,6 +111,19 @@ func (c *Client) Validate() error {
 	default:
 		return fmt.Errorf("unsupported security %q", c.TLS)
 	}
+	if !validAddress(c.Address) {
+		return fmt.Errorf("invalid address %q", c.Address)
+	}
+	// Short identifier fields are stored and shown in the UI; refuse control
+	// characters so a subscription can't save garbage.
+	for _, f := range []struct{ name, v string }{
+		{"id", c.ID}, {"name", c.Name}, {"flow", c.Flow}, {"security", c.Security}, {"encryption", c.Encryption},
+		{"fingerprint", c.Fingerprint}, {"publicKey", c.PublicKey}, {"shortId", c.ShortID},
+	} {
+		if hasCtl(f.v) {
+			return fmt.Errorf("invalid %s %q", f.name, f.v)
+		}
+	}
 	// Values below end up in dial targets, HTTP request lines and headers.
 	for _, f := range []struct{ name, v string }{
 		{"address", c.Address}, {"sni", c.SNI}, {"host", c.Host}, {"authority", c.Authority}, {"path", c.Path},
@@ -134,6 +148,23 @@ func (c *Client) Validate() error {
 		}
 	}
 	return nil
+}
+
+// validAddress accepts an IP literal (IPv6 without brackets) or a host name
+// made of letters, digits, '-', '_' and '.'.
+func validAddress(a string) bool {
+	if a == "" || len(a) > 253 {
+		return false
+	}
+	if _, err := netip.ParseAddr(a); err == nil {
+		return true
+	}
+	for _, r := range a {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func hasCtl(s string) bool {

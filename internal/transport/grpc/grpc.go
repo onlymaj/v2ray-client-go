@@ -26,7 +26,6 @@
 package grpc
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -368,8 +367,10 @@ func statusErr(h http.Header) error {
 	return nil
 }
 
-// maxMessage bounds a received message (grpc-go's default receive limit).
-const maxMessage = 4 << 20
+// maxMessage bounds a received message. Xray sends one buffer (at most 8 KiB)
+// per Tun message and one MultiBuffer per TunMulti message, so 1 MiB leaves
+// plenty of room while keeping a stream's worst case small on a 32 MiB budget.
+const maxMessage = 1 << 20
 
 // maxChunk bounds the payload of one sent message.
 const maxChunk = 32 << 10
@@ -568,14 +569,19 @@ func readMessage(r io.Reader) ([]byte, error) {
 	if n > maxMessage {
 		return nil, fmt.Errorf("grpc: message too large (%d)", n)
 	}
-	// Grow the buffer as the body arrives instead of allocating n up front:
-	// otherwise a server could pin maxMessage bytes per stream by sending
-	// only a header.
-	var buf bytes.Buffer
-	for rem := int64(n); rem > 0; {
-		step := min(rem, readStep)
-		m, err := io.CopyN(&buf, r, step)
-		rem -= m
+	// Grow the buffer as the body arrives instead of allocating n up front
+	// (otherwise a server could pin maxMessage bytes per stream by sending
+	// only a header), and never past n (a doubling buffer would keep up to
+	// 2n alive).
+	b := make([]byte, 0, min(int(n), readStep))
+	for len(b) < int(n) {
+		if len(b) == cap(b) {
+			nb := make([]byte, len(b), min(int(n), 2*cap(b)))
+			copy(nb, b)
+			b = nb
+		}
+		m, err := io.ReadFull(r, b[len(b):cap(b)])
+		b = b[:len(b)+m]
 		if err != nil {
 			if err == io.EOF {
 				err = io.ErrUnexpectedEOF
@@ -583,7 +589,7 @@ func readMessage(r io.Reader) ([]byte, error) {
 			return nil, fmt.Errorf("grpc: truncated message: %w", err)
 		}
 	}
-	return buf.Bytes(), nil
+	return b, nil
 }
 
 // readStep is how much of a message body readMessage reads (and so
