@@ -101,6 +101,7 @@ type Server struct {
 	queries  perSource // upstream queries in flight
 	tcpConns perSource // open client TCP conns
 	udpRate  rateLimiter
+	failLog  logLimiter
 
 	mu       sync.Mutex
 	upstream outbound.Addr
@@ -391,8 +392,11 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 	}
 	up, upErr := s.upstreamAddr()
 	key := s.routeKey(src, q.Name, up)
-	if resp := s.cache.get(query, q, key); resp != nil {
-		return resp
+	variant, shared := cacheVariant(query, h, q)
+	if shared {
+		if resp := s.cache.get(query, q, key+variant); resp != nil {
+			return resp
+		}
 	}
 	if !s.queries.acquire(src) {
 		return errorResponse(query, rcodeServFail) // not logged: a flood would fill the log
@@ -400,11 +404,16 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 	defer s.queries.release(src)
 	resp, cacheable, err := s.exchange(ctx, src, query, q, up, upErr, key)
 	if err != nil {
-		s.opts.Logf("dns: %s %s from %s: %v", q.Name, typeString(q.Type), src, err)
+		if ok, dropped := s.failLog.allow(time.Now()); ok {
+			if dropped > 0 {
+				s.opts.Logf("dns: %d more failed queries not logged", dropped)
+			}
+			s.opts.Logf("dns: %s %s from %s: %v", q.Name, typeString(q.Type), src, err)
+		}
 		return errorResponse(query, rcodeServFail)
 	}
-	if cacheable {
-		s.cache.put(q, key, resp)
+	if cacheable && shared {
+		s.cache.put(q, key+variant, resp)
 	}
 	return resp
 }
@@ -751,4 +760,37 @@ func (r *rateLimiter) evictLocked(now time.Time) {
 		}
 		delete(r.b, k)
 	}
+}
+
+// Failed queries are logged at most failLogBurst times per failLogWindow.
+// While a route is blocked or every proxy is down, each LAN query fails, and
+// a line per query would flood the router's log.
+const (
+	failLogBurst  = 10
+	failLogWindow = 10 * time.Second
+)
+
+type logLimiter struct {
+	mu      sync.Mutex
+	start   time.Time
+	n       int
+	dropped int
+}
+
+// allow reports whether one more line may be logged now. With the first
+// line of a new window it also returns how many lines were dropped since
+// the last one that was logged.
+func (l *logLimiter) allow(now time.Time) (ok bool, dropped int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Sub(l.start) >= failLogWindow {
+		l.start, l.n = now, 0
+	}
+	if l.n >= failLogBurst {
+		l.dropped++
+		return false, 0
+	}
+	l.n++
+	dropped, l.dropped = l.dropped, 0
+	return true, dropped
 }

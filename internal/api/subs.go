@@ -139,7 +139,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		}
 		sp.LastUpdate = now
 		if ferr != nil {
-			sp.LastError = ferr.Error()
+			sp.LastError = clip(ferr.Error(), maxLastError)
 			out = *sp
 			return nil
 		}
@@ -198,4 +198,17 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		}
 	}
 	return out, nil
+}
+
+// maxLastError bounds a stored fetch error. Its text can come from the
+// subscription server (a redirect target, for one) and is written to
+// config.json on every save.
+const maxLastError = 300
+
+// clip cuts s to at most n bytes of valid UTF-8.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return strings.ToValidUTF8(s, "")
+	}
+	return strings.ToValidUTF8(s[:n], "") + "..."
 }

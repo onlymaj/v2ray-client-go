@@ -63,7 +63,7 @@ func (d *Dispatcher) recheck(onlyKillSwitch bool) {
 		if onlyKillSwitch && !r.dec.KillSwitch {
 			continue
 		}
-		if routeChanged(r, d.Route(r.src, r.domain, r.dstIP), st) {
+		if routeChanged(r, d.Preview(r.src, r.domain, r.dstIP), st) {
 			r.cut()
 		}
 	}

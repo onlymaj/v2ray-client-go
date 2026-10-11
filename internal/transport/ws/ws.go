@@ -416,9 +416,14 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		if len(ed) > d.l.ed {
 			ed = nil
 		}
+		// The timeout closes the conn instead of setting a deadline on it:
+		// handshake would clear the deadline afterwards, and with it one
+		// the caller set meanwhile to interrupt its own Read.
 		ctx, cancel := context.WithTimeout(context.Background(), earlyDataTimeout)
 		defer cancel()
-		d.ws, d.err = d.l.handshake(ctx, d.Conn, ed)
+		stop := context.AfterFunc(ctx, func() { d.Conn.Close() })
+		defer stop()
+		d.ws, d.err = d.l.handshake(context.Background(), d.Conn, ed)
 		wrote = d.err == nil && ed != nil
 		close(d.dialed)
 	})

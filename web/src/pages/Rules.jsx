@@ -22,7 +22,7 @@ const KINDS = [
 const PLACEHOLDER = {
   source: '192.168.88.10\n192.168.88.32/28',
   domain: 'netflix.com  (also matches subdomains)\nir',
-  dest: '10.0.0.0/8\n:853  (port)',
+  dest: '10.0.0.0/8\n1.1.1.1',
 };
 
 let keySeq = 0;

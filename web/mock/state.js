@@ -403,7 +403,7 @@ export function removeClientRefs(id) {
     g.members = g.members.filter((m) => m !== id);
     if (g.current === id) g.current = '';
   }
-  for (const r of db.rules) if (r.target.kind === 'client' && r.target.id === id) r.target = { kind: 'direct', id: '' };
+  db.rules = db.rules.filter((r) => !(r.target.kind === 'client' && r.target.id === id));
 }
 
 export const nowIso = () => iso(now());

@@ -109,7 +109,7 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 	defer d.relays.remove(ar)
 	// A config change during the dial ran its recheck before this relay was
 	// registered; check it now against the current state.
-	if routeChanged(ar, d.Route(src.Addr(), domain, dst.IP), d.st.Load()) {
+	if routeChanged(ar, d.Preview(src.Addr(), domain, dst.IP), d.st.Load()) {
 		return
 	}
 	if len(head) > 0 {

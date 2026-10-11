@@ -201,7 +201,7 @@ add list=v2ray-bypass address=240.0.0.0/4
 ```
 
 - `v2ray-bypass` is static and maintained by you. It holds private, CGNAT, multicast and reserved ranges, plus anything else that must never go through the proxy, such as the endpoints of VPN tunnels the router itself opens.
-- `no-proxy` belongs to the app (the setting `routeros.addressList`, default `no-proxy`). The app keeps it in sync through the REST API: proxy server addresses (after re-resolving hostnames) and destinations that your rules send `direct`. Keep your own entries in `v2ray-bypass` so a sync never removes them. If you do not enable REST sync and you route router-originated traffic (below), create `no-proxy` by hand and **at least add every proxy server IP to it**.
+- `no-proxy` belongs to the app (the setting `routeros.addressList`, default `no-proxy`). The app keeps it in sync through the REST API: the addresses of the enabled proxy servers (after re-resolving hostnames, at most 8 addresses per name). Keep your own entries in `v2ray-bypass` so a sync never removes them. If you do not enable REST sync and you route router-originated traffic (below), create `no-proxy` by hand and **at least add every proxy server IP to it**.
 
 `v2ray-bypass` applies to LAN and router traffic. `no-proxy` applies **only to router-originated traffic** (the `output` chain): there it stops the router's connections to the proxy servers from looping back into the container. The container's own connections need no such exclusion, because they do not enter from `LAN`. (A malicious subscription can still make the router's own connections to an IP it lists go out directly. That affects only router-originated traffic.)
 
@@ -362,7 +362,7 @@ openssl s_client -connect 172.17.0.1:443 </dev/null 2>/dev/null \
   | openssl x509 -outform der | sha256sum
 ```
 
-Both must print the same value. The app then rejects any other certificate, even if it is otherwise valid. When you renew or replace the certificate, update the pin, or the sync stops (it shows in the RouterOS status in the UI).
+Both must print the same value. The app then rejects any other certificate, even if it is otherwise valid. When you renew or replace the certificate, update the pin, or the sync stops (the container log shows the error).
 
 Configure the same URL, user, password and pin in the UI (Settings → RouterOS), or pass the URL and credentials as `ROS_*` envs (section 5). Check that it works:
 
@@ -406,22 +406,22 @@ Open `http://172.17.0.2/` from a LAN host and log in with `ADMIN_PASSWORD`.
 ```routeros
 /ip/firewall/filter
 add chain=forward action=accept dst-address=172.17.0.2 protocol=tcp dst-port=80 \
-    src-address=192.168.88.10 comment="v2ray-client: UI from admin host" place-before=[find action=fasttrack-connection]
+    connection-state=new src-address=192.168.88.10 comment="v2ray-client: UI from admin host" place-before=[find action=fasttrack-connection]
 add chain=forward action=reject reject-with=tcp-reset dst-address=172.17.0.2 protocol=tcp dst-port=!53 \
-    comment="v2ray-client: no other direct access to the container" place-before=[find action=fasttrack-connection]
+    connection-state=new comment="v2ray-client: no other direct access to the container" place-before=[find action=fasttrack-connection]
 ```
 
 **Give each admin host a static DHCP lease** (`/ip/dhcp-server/lease/make-static [find address=192.168.88.10]`). The rules above trust the address. A login session is also bound to the client IP it logged in from, so a session cookie sniffed from the plaintext traffic cannot be replayed from another address. With a dynamic lease, the admin host can get a new address, which ends its session, and another device can later get the admin's old address.
 
-The second rule also blocks the SOCKS and HTTP ports if you enable them. Proxied traffic is not affected: it is routed to the container with its original destination address, not addressed to `172.17.0.2`. DNS (port 53) stays open for option A in section 8.
+Both rules match only new connections (`connection-state=new`). Without that, the second rule would also reset the replies to the container's own outgoing connections, which arrive with the destination `172.17.0.2`, and nothing would be proxied. The second rule also blocks the SOCKS and HTTP ports if you enable them. Proxied traffic is not affected: it is routed to the container with its original destination address, not addressed to `172.17.0.2`. DNS (port 53) stays open for option A in section 8.
 
 The SOCKS5 and HTTP CONNECT inbounds are **off by default** (port 0). They have no authentication and can connect to any address, including the router's own services at `172.17.0.1`. A connection through them reaches the router with the container's address, which gets around the `address=172.17.0.2/32` limit on the REST user. Enable them (settings `ports.socks` / `ports.http`, then restart) only if you need them, and allow them only from trusted hosts with a forward rule like the one above.
 
 ### Private server addresses (`allowPrivateServers`)
 
-By default, clients that came from a **subscription** may not use private (RFC 1918, ULA) or CGNAT server addresses. Otherwise a malicious subscription could make the container open health checks and connections to devices on your LAN. Clients you add by hand or import from share links may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
+By default, clients that came from a **subscription** or from **pasted share links** (shown as "untrusted") may not use private (RFC 1918, ULA) or CGNAT server addresses. Otherwise a malicious subscription could make the container open health checks and connections to devices on your LAN. Clients you add or save through the form may always use them; saving an imported client in the form lifts the restriction for it. Loopback, link-local, the container's own address and its gateway are always refused.
 
-If your subscription provider really serves from a private or CGNAT address (for example a server on your own LAN or behind a carrier NAT), turn on Settings → "Allow subscription servers on private/LAN addresses" (`settings.allowPrivateServers`). Turn it on only for subscriptions you trust.
+If a subscription or imported link really serves from a private or CGNAT address (for example a server on your own LAN or behind a carrier NAT), turn on Settings → "Allow untrusted servers on private/LAN addresses" (`settings.allowPrivateServers`). Turn it on only for subscriptions you trust.
 
 ## Troubleshooting
 
@@ -440,4 +440,4 @@ If your subscription provider really serves from a private or CGNAT address (for
 - **Works for a few seconds, then stalls:** fasttrack is still active for marked connections. See section 7.
 - **Everything loops or times out:** `br-containers` is in the `LAN` list, or a proxy server IP is missing from `no-proxy`/`v2ray-bypass` while router-originated traffic is marked.
 - **No shell:** the image is `scratch`, so `/container/shell` has nothing to run. Use the logs and the UI.
-- **Memory (RSS):** the app reports its RSS (from `/proc/self/status`) in the settings/debug info of the API and UI. Some v7 versions also show container memory in `/container/print detail`. For the whole box, compare `free-memory` in `/system/resource/print` before and after starting the container. The UPX-packed binary unpacks into anonymous memory, so expect a baseline of about 10–12 MB before any traffic.
+- **Memory (RSS):** the app does not report its own memory use. Some v7 versions show container memory in `/container/print detail`. For the whole box, compare `free-memory` in `/system/resource/print` before and after starting the container. The UPX-packed binary unpacks into anonymous memory, so expect a baseline of about 10–12 MB before any traffic.

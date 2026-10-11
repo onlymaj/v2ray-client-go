@@ -251,10 +251,22 @@ func (s *Syncer) backoff(fails int) time.Duration {
 	return min(d, s.opts.MaxBackoff)
 }
 
+// Bounds on what one sync pass resolves and sends to the router.
+const (
+	maxAddrsPerHost = 8
+	maxAddrs        = 2048
+	maxResolvePass  = 2 * time.Minute
+)
+
 // resolveAll returns the sorted, de-duplicated IPv4 addresses of hosts.
 // A host that fails to resolve keeps its last good addresses in cache so a
 // transient DNS failure does not remove it from the router.
 func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[string][]netip.Addr) ([]string, error) {
+	// One pass may not take longer than this in total, or a subscription
+	// with many slow host names would keep the loop from seeing config
+	// changes for hours. Hosts not reached keep their cached addresses.
+	ctx, cancelAll := context.WithTimeout(ctx, maxResolvePass)
+	defer cancelAll()
 	set := map[string]bool{}
 	var errs []error
 	seen := map[string]bool{}
@@ -277,10 +289,14 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 			errs = append(errs, fmt.Errorf("resolve %s: %w", h, err))
 			ips = cache[h]
 		} else {
+			// A host name from a subscription can resolve to thousands of
+			// addresses; each would become a firewall entry on the router.
+			slices.SortFunc(ips, netip.Addr.Compare) // which ones are kept must not vary
+			ips = ips[:min(len(ips), maxAddrsPerHost)]
 			cache[h] = ips
 		}
 		for _, ip := range ips {
-			if ip = ip.Unmap(); ip.Is4() {
+			if ip = ip.Unmap(); ip.Is4() && len(set) < maxAddrs {
 				set[ip.String()] = true
 			}
 		}

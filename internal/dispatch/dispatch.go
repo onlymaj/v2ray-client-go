@@ -164,12 +164,18 @@ func (d *Dispatcher) update(cfg *config.Config) error {
 	for id, oe := range old.clients {
 		if oe.c != nil {
 			if ne := ns.clients[id]; ne == nil || ne.c != oe.c {
-				oe.c.Close()
+				// In the background: closing a gRPC client waits for a dial
+				// in progress, which can take the whole dial timeout when
+				// the server is dead, and a config update must never hang.
+				go closeClient(oe.c)
 			}
 		}
 	}
 	return errors.Join(errs...)
 }
+
+// closeClient is a var so a test can make closing slow.
+var closeClient = func(c *client.Client) { c.Close() }
 
 // feed reports a member's last known health (down if unavailable).
 func (d *Dispatcher) feed(st *state, sel *group.Selector, id string) {
@@ -254,6 +260,17 @@ func (d *Dispatcher) GroupStatus(id string) []group.MemberStatus {
 // Route decides where a connection goes. domain may be empty; src/dst may
 // be invalid.
 func (d *Dispatcher) Route(src netip.Addr, domain string, dst netip.Addr) Decision {
+	return d.route(src, domain, dst, true)
+}
+
+// Preview returns the decision Route would make, without consuming a
+// round-robin turn. Use it wherever no connection follows the decision:
+// re-checking established relays, cache and pool keys.
+func (d *Dispatcher) Preview(src netip.Addr, domain string, dst netip.Addr) Decision {
+	return d.route(src, domain, dst, false)
+}
+
+func (d *Dispatcher) route(src netip.Addr, domain string, dst netip.Addr, advance bool) Decision {
 	st := d.st.Load()
 	r := st.engine.Match(src, domain, dst)
 	if r == nil {
@@ -280,7 +297,11 @@ func (d *Dispatcher) Route(src netip.Addr, domain string, dst netip.Addr) Decisi
 		if key == "" && dst.IsValid() {
 			key = dst.String()
 		}
-		id, ok := g.sel.Pick(src, key)
+		pick := g.sel.Peek
+		if advance {
+			pick = g.sel.Pick
+		}
+		id, ok := pick(src, key)
 		if !ok || !st.usable(id) {
 			return st.kill(dec)
 		}

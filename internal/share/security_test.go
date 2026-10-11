@@ -47,3 +47,39 @@ func TestParseBulkLimit(t *testing.T) {
 		t.Fatalf("clients=%d errors=%+v", len(r.Clients), r.Errors)
 	}
 }
+
+// Round 8: the dialer lowercases the VMess cipher, so "scy":"NONE" sent
+// plaintext while the UI, comparing exactly, showed no "unencrypted" badge.
+// The cipher is stored in lower case and unknown ones are refused.
+func TestVMessCipherCanonical(t *testing.T) {
+	link := func(scy string) string {
+		return vmessLink(`{"add":"h.example.com","port":443,"id":"` + secUUID + `","net":"tcp","scy":"` + scy + `"}`)
+	}
+	for in, want := range map[string]string{"NONE": "none", "Zero": "zero", "AES-128-GCM": "aes-128-gcm", "auto": "auto"} {
+		c, err := Parse(link(in))
+		if err != nil || c.Security != want {
+			t.Errorf("scy %q: security %q, err %v; want %q", in, c.Security, err, want)
+		}
+	}
+	if _, err := Parse(link("bogus")); err == nil {
+		t.Error("unknown vmess cipher accepted")
+	}
+}
+
+// Round 8: no field but the address had a length limit, so one subscription
+// link could store megabytes in config.json (rewritten on every save).
+func TestFieldLengthLimit(t *testing.T) {
+	long := strings.Repeat("a", maxFieldLen+1)
+	for _, l := range []string{
+		"vless://" + secUUID + "@h.example.com:443?type=ws&path=/" + long + "#n",
+		"vless://" + secUUID + "@h.example.com:443?type=tcp#" + long,
+		vmessLink(`{"add":"h.example.com","port":443,"id":"` + secUUID + `","net":"ws","ps":"` + long + `"}`),
+	} {
+		if _, err := Parse(l); err == nil {
+			t.Errorf("over-long field accepted: %.60s...", l)
+		}
+	}
+	if _, err := Parse("vless://" + secUUID + "@h.example.com:443?type=ws&path=/" + long[:900] + "#n"); err != nil {
+		t.Errorf("900-byte path refused: %v", err)
+	}
+}

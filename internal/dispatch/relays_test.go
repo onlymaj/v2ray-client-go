@@ -1,12 +1,16 @@
 package dispatch
 
 import (
+	"io"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/onlymaj/v2ray-client-go/internal/client"
 	"github.com/onlymaj/v2ray-client-go/internal/config"
+	"github.com/onlymaj/v2ray-client-go/internal/group"
+	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 )
 
 // register adds a fake established relay for (src, domain, dst) routed as
@@ -134,5 +138,66 @@ func TestRelayCutWhenClientEditedOrRemovedFromGroup(t *testing.T) {
 	}
 	if !cutGroup2() {
 		t.Fatal("relay through a client removed from its group survived")
+	}
+}
+
+// Regression (round 8): re-checking a relay's route (after registering it,
+// and on every config save or health result) took a round-robin turn, so
+// with two members every connection landed on the same one.
+func TestRecheckLeavesRoundRobinAlone(t *testing.T) {
+	cfg := testConfig()
+	cfg.Groups[0].Strategy = group.RoundRobin // g1: a, b; the default route
+	tr := &fakeTracker{}
+	d, err := New(cfg, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	d.HealthUpdate("a", true, time.Millisecond)
+	d.HealthUpdate("b", true, time.Millisecond)
+	for range 6 {
+		user, done := run(t, d, tr, outbound.Addr{IP: other, Port: 80}, false)
+		user.CloseWrite()
+		io.Copy(io.Discard, user)
+		user.Close()
+		<-done
+		d.recheck(false) // as a config save would
+	}
+	var got string
+	for _, o := range tr.open {
+		got += o.client
+	}
+	if got != "ababab" {
+		t.Fatalf("round-robin picked %q, want ababab", got)
+	}
+	if d.Preview(lan, "", other).ClientID != "a" || d.Preview(lan, "", other).ClientID != "a" {
+		t.Fatal("Preview moved the round-robin on")
+	}
+}
+
+// Regression (round 8): closing a replaced gRPC client waits for a dial in
+// progress (up to the dial timeout with a dead server). Update must not
+// wait for it while holding the dispatcher lock.
+func TestUpdateDoesNotWaitForClientClose(t *testing.T) {
+	block := make(chan struct{})
+	orig := closeClient
+	closeClient = func(*client.Client) { <-block }
+	defer func() { close(block); closeClient = orig }()
+	d, err := New(testConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testConfig()
+	cfg.Clients[0].Port = 2 // rebuilt: the old client is closed
+	done := make(chan struct{})
+	go func() {
+		d.Update(cfg)
+		d.HealthUpdate("a", true, time.Millisecond) // needs the dispatcher lock
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Update blocked on closing the replaced client")
 	}
 }

@@ -72,6 +72,11 @@ type Settings struct {
 	HealthCheckTimeout int    `json:"healthCheckTimeout"`
 }
 
+// streamWindow is the HTTP/2 receive window of one tunnel: the most a
+// stream buffers when its reader stalls. Throughput per stream is about
+// streamWindow per round trip (10 Mbit/s at 200 ms).
+const streamWindow = 256 << 10
+
 // StreamDialer opens tunnels as streams over a shared HTTP/2 connection.
 // dialRaw must return a connection ready to speak HTTP/2 (TLS with ALPN
 // "h2" negotiated, or cleartext with prior knowledge); it is called only
@@ -85,11 +90,12 @@ type Client struct {
 	path      string
 	authority string
 	ua        string
-	t         http2.Transport
+	t         *http2.Transport
 
-	mu  sync.Mutex
-	cc  *http2.ClientConn
-	raw net.Conn // underlying conn of cc, for addresses
+	mu     sync.Mutex
+	cc     *http2.ClientConn
+	raw    net.Conn // underlying conn of cc, for addresses
+	closed bool
 }
 
 var _ StreamDialer = (*Client)(nil)
@@ -120,6 +126,15 @@ func New(settings []byte) (transport.Layer, error) {
 		authority: s.Authority,
 		ua:        s.UserAgent,
 	}
+	// The default receive window is 4 MiB per stream, held in memory while
+	// the reader is slow: a LAN device that stops reading its downloads
+	// would pin 4 MiB per connection. ConfigureTransports is the only way to
+	// set the window; the http.Transport itself is never used.
+	t, err := http2.ConfigureTransports(&http.Transport{HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow}})
+	if err != nil {
+		return nil, fmt.Errorf("grpc: %w", err)
+	}
+	c.t = t
 	if c.ua == "" {
 		c.ua = "grpc-go/1.73.0"
 	}
@@ -211,6 +226,9 @@ func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Context) (net.Conn, error)) (net.Conn, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil, net.ErrClosed
+	}
 	// ReserveNewRequest atomically checks liveness / stream limits and
 	// claims a slot that the next RoundTrip uses.
 	if c.cc == nil || !c.cc.ReserveNewRequest() {
@@ -242,11 +260,13 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 }
 
 // Close closes the shared HTTP/2 connection (aborting its streams) so a
-// discarded Client stops sending keepalive pings. A later DialStream dials
-// again.
+// discarded Client stops sending keepalive pings. A later DialStream fails:
+// a connection still holding the old client must not open a new shared
+// connection that nothing would close.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closed = true
 	if c.cc == nil {
 		return nil
 	}

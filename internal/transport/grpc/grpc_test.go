@@ -241,6 +241,12 @@ func TestRedialAfterDeadConnection(t *testing.T) {
 		t.Fatal("stream survived Client.Close")
 	}
 	cl.Close() // idempotent
+	// Round 8: a closed Client must not dial again. A connection that still
+	// held the discarded client would open a shared HTTP/2 connection that
+	// nothing closes, kept alive by its pings.
+	if _, err := cl.DialStream(context.Background(), srv.dialRaw(&calls)); err == nil || calls.Load() != 2 {
+		t.Fatalf("DialStream after Close: err=%v, dialRaw calls %d", err, calls.Load())
+	}
 }
 
 func TestWrapAndErrors(t *testing.T) {

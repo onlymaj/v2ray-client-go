@@ -12,6 +12,10 @@ const (
 	minTTL         = 5 * time.Second
 	maxTTL         = time.Hour
 	maxNegativeTTL = 5 * time.Minute
+	// maxCachedResp is the largest response kept. Upstream answers arrive
+	// over TCP and can be 64 KB; a LAN device asking for 1024 such names
+	// would otherwise pin 64 MB.
+	maxCachedResp = 4096
 )
 
 type cacheKey struct {
@@ -89,7 +93,7 @@ func (c *cache) get(query []byte, q question, route string) []byte {
 // answers) for the SOA minimum, capped at 5 minutes.
 func (c *cache) put(q question, route string, resp []byte) {
 	h, rq, err := parseQuestion(resp)
-	if err != nil || h.Flags&flagTC != 0 || keyOf(rq) != keyOf(q) {
+	if err != nil || len(resp) > maxCachedResp || h.Flags&flagTC != 0 || keyOf(rq) != keyOf(q) {
 		return
 	}
 	rc := h.rcode()

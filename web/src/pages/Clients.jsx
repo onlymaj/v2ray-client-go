@@ -20,7 +20,7 @@ const INSECURE_HINT = 'Certificate verification is off: anyone on the network pa
  * encryption of its own, and VMess with cipher none/zero doesn't either.
  */
 export const unencrypted = (c) =>
-  c.tls === 'none' && (c.protocol === 'vless' || ['none', 'zero'].includes(c.security));
+  c.tls === 'none' && (c.protocol === 'vless' || ['none', 'zero'].includes(String(c.security || '').toLowerCase()));
 export const UNENCRYPTED_HINT = 'No transport encryption: anyone on the network path (ISP, censor) can read this traffic and, for VLESS, change where connections go.';
 /** Why an untrusted client is restricted and how to lift it. */
 export const untrustedHint = (c) =>

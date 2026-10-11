@@ -3,12 +3,14 @@
 // Rule types:
 //   - "source": Values are client IPs or CIDRs, matched against the source.
 //   - "dest":   Values are IPs or CIDRs, matched against the destination IP.
-//   - "domain": Values are domains. "example.com" matches exactly that name;
-//     "*.example.com" matches any subdomain (a.example.com, a.b.example.com)
-//     but NOT example.com itself — list both to cover both. Matching is
+//   - "domain": Values are domains. "example.com" matches that name and
+//     every subdomain (a.example.com, a.b.example.com), as the UI and
+//     web/API.md say; "ir" matches every name under .ir. "*.example.com"
+//     matches the subdomains but NOT example.com itself. Matching is
 //     case-insensitive and ignores a trailing dot.
-//   - "default": the fallback, used when no other rule matches regardless of
-//     its position in the list. At most one is allowed.
+//   - "default": matches everything. At most one is allowed. Rules listed
+//     after it never match, as the UI tells the admin: a rule dragged
+//     below the default must not stay live unseen.
 //
 // Rules are evaluated top to bottom; the first match wins.
 package router
@@ -94,7 +96,9 @@ func Compile(rules []Rule) (*Engine, error) {
 		default:
 			return nil, fmt.Errorf("rule %q: unknown type %q", r.ID, r.Type)
 		}
-		e.rules = append(e.rules, c)
+		if e.def == nil { // rules after the default are checked but unused
+			e.rules = append(e.rules, c)
+		}
 	}
 	return e, nil
 }
@@ -184,12 +188,12 @@ func (c *compiled) matchDomain(d string) bool {
 	if _, ok := c.exact[d]; ok {
 		return true
 	}
-	if len(c.suffix) == 0 {
-		return false
-	}
 	for i := 0; i < len(d); i++ {
 		if d[i] == '.' {
 			if _, ok := c.suffix[d[i+1:]]; ok {
+				return true
+			}
+			if _, ok := c.exact[d[i+1:]]; ok {
 				return true
 			}
 		}

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
 	"github.com/onlymaj/v2ray-client-go/internal/share"
@@ -381,5 +382,19 @@ func TestSessionIdleTimeout(t *testing.T) {
 	now = now.Add(2 * time.Hour)
 	if a.valid(sessionReq(tok, ip)) {
 		t.Fatal("session outlived sessionTTL")
+	}
+}
+
+// Round 8: a subscription server's status line (megabytes of it) was stored
+// as the subscription's lastError and written to config.json on every save.
+func TestFetchErrorIsClipped(t *testing.T) {
+	if got := clip(strings.Repeat("x", 5000), maxLastError); len(got) > maxLastError+3 {
+		t.Fatalf("clip kept %d bytes", len(got))
+	}
+	if got := clip("caf\xc3", 10); got != "caf" {
+		t.Fatalf("clip kept invalid UTF-8: %q", got)
+	}
+	if got := clip(strings.Repeat("é", 200), 301); !utf8.ValidString(got) {
+		t.Fatal("clip cut a rune in half")
 	}
 }

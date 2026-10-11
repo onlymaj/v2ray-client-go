@@ -353,7 +353,9 @@ func (c *clientConn) Read(p []byte) (int, error) {
 			c.rerr = err
 			return 0, err
 		}
-		if cap(pt) > cap(c.rbuf) {
+		// Keep a grown buffer only up to the usual chunk size, so a server
+		// sending one 64 KB chunk doesn't make every conn hold 64 KB.
+		if cap(pt) > cap(c.rbuf) && cap(pt) <= 20<<10 {
 			c.rbuf = pt[:0]
 		}
 		if len(pt) == 0 {

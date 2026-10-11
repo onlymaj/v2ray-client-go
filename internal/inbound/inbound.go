@@ -27,8 +27,9 @@ const handshakeTimeout = 10 * time.Second
 
 // Open connection limits shared by every inbound (vars so tests can lower
 // them). maxConns is sized for GOMEMLIMIT=32MiB: a relayed conn costs about
-// 20-40 KB (two goroutines, two 16 KB copy buffers, outbound TLS state), so
-// 512 conns stay within ~20 MB. Sources are counted per IPv4 address and
+// 50 KB while data flows both ways (two goroutines, two 16 KB copy buffers,
+// 8-16 KB of protocol buffers, outbound TLS state), so 512 busy conns need
+// about 25 MB; idle ones hold much less. Sources are counted per IPv4 address and
 // per IPv6 /64, so privacy addresses don't multiply the per-source cap.
 //
 // When the global cap is full, a new conn from a source below its fair

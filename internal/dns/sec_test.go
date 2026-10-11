@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -436,5 +437,94 @@ func TestUnlimitedSource(t *testing.T) {
 	q := buildQuery(1, "a.example", typeA, 0)
 	if n, tc := udpReplies(t, router.String(), addr, q, 100); n != 100 || tc != 0 {
 		t.Fatalf("unlimited source: %d full, %d TC of 100", n, tc)
+	}
+}
+
+// Round 7 stress test: with a blocked route every query failed and logged
+// one line, about 100 lines per second. Failed queries may log only
+// failLogBurst lines per window, then one count of the lines left out.
+func TestFailedQueryLogIsRateLimited(t *testing.T) {
+	var lines []string
+	s := New(Options{
+		Dial: func(context.Context, netip.Addr, string, outbound.Addr) (net.Conn, error) {
+			return nil, errors.New("dispatch: blocked")
+		},
+		Upstream: "192.0.2.1:53",
+		Logf:     func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
+	})
+	for i := range 200 {
+		r := s.handle(context.Background(), netip.MustParseAddr("192.168.88.10"), buildQuery(uint16(i), fmt.Sprintf("h%d.example", i), typeA, 0))
+		if h, _ := parseHeader(r); h.rcode() != rcodeServFail {
+			t.Fatalf("query %d: got %+v", i, h)
+		}
+	}
+	if len(lines) != failLogBurst {
+		t.Fatalf("200 failed queries logged %d lines, want %d", len(lines), failLogBurst)
+	}
+
+	var l logLimiter
+	now := time.Now()
+	for range failLogBurst + 7 {
+		l.allow(now)
+	}
+	if ok, dropped := l.allow(now.Add(failLogWindow)); !ok || dropped != 7 {
+		t.Fatalf("next window: ok=%v dropped=%d, want true and 7", ok, dropped)
+	}
+}
+
+// Round 8: the cache was bounded by entry count only, so 1024 names with
+// 60 KB answers pinned about 64 MB. Large responses are not cached.
+func TestLargeResponseNotCached(t *testing.T) {
+	c := newCache(8)
+	q := buildQuery(1, "big.example", typeA, 0)
+	_, qq, _ := parseQuestion(q)
+	ttls := make([]uint32, 400) // 16 bytes per record: 6.4 KB
+	for i := range ttls {
+		ttls[i] = 300
+	}
+	c.put(qq, "", buildAResponse(q, ttls...))
+	if c.len() != 0 {
+		t.Fatal("response over maxCachedResp was cached")
+	}
+	c.put(qq, "", buildAResponse(q, 300))
+	if c.len() != 1 {
+		t.Fatal("small response not cached")
+	}
+}
+
+// Round 8: an answer to a query with an EDNS Client Subnet option or the CD
+// bit is tailored to that query and must not be cached for other clients;
+// DO and non-DO answers are cached apart.
+func TestCacheVariant(t *testing.T) {
+	plain := buildQuery(1, "cdn.example", typeA, 1232)
+	withOpt := func(ttl uint32, opt []byte) []byte {
+		q := append([]byte(nil), plain[:len(plain)-6]...)
+		q = u16(u32(q, ttl), uint16(len(opt)))
+		return append(q, opt...)
+	}
+	cd := append([]byte(nil), plain...)
+	cd[3] |= flagCD
+	for _, tc := range []struct {
+		name    string
+		q       []byte
+		variant string
+		shared  bool
+	}{
+		{"plain", plain, "", true},
+		{"no edns", buildQuery(1, "cdn.example", typeA, 0), "", true},
+		{"do", withOpt(1<<15, nil), "|do", true},
+		{"cookie", withOpt(0, []byte{0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8}), "", true},
+		{"ecs", withOpt(0, []byte{0, 8, 0, 7, 0, 1, 24, 0, 203, 0, 113}), "", false},
+		{"ecs after cookie", withOpt(0, []byte{0, 10, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 8, 0, 4, 0, 1, 0, 0}), "", false},
+		{"bad option length", withOpt(0, []byte{0, 10, 0, 9, 1}), "", false},
+		{"cd", cd, "", false},
+	} {
+		h, q, err := parseQuestion(tc.q)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if v, s := cacheVariant(tc.q, h, q); v != tc.variant || s != tc.shared {
+			t.Errorf("%s: variant %q shared %v, want %q %v", tc.name, v, s, tc.variant, tc.shared)
+		}
 	}
 }

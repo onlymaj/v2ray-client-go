@@ -82,6 +82,9 @@ func (c Client) Link() (string, error) {
 	return "", fmt.Errorf("unknown protocol %q", c.Protocol)
 }
 
+// maxFieldLen bounds every free-text field of a client.
+const maxFieldLen = 1024
+
 // Validate checks that c has the fields every dialer needs and only uses
 // supported transports.
 func (c *Client) Validate() error {
@@ -121,6 +124,17 @@ func (c *Client) Validate() error {
 			return errors.New("invalid UTF-8 in link")
 		}
 	}
+	// Everything here is stored in config.json and returned by the API; a
+	// subscription must not be able to store megabytes in one field.
+	for _, v := range []string{c.Name, c.ID, c.Flow, c.Security, c.Encryption, c.SNI, c.Fingerprint,
+		c.PublicKey, c.ShortID, c.SpiderX, c.Path, c.Host, c.ServiceName, c.Authority} {
+		if len(v) > maxFieldLen {
+			return fmt.Errorf("field too long (%d bytes, limit %d)", len(v), maxFieldLen)
+		}
+	}
+	if len(c.ALPN) > 8 {
+		return errors.New("too many alpn values")
+	}
 	if !validAddress(c.Address) {
 		return fmt.Errorf("invalid address %q", c.Address)
 	}
@@ -129,6 +143,17 @@ func (c *Client) Validate() error {
 	// clear to a server that expects it encrypted.
 	if c.Protocol == "vless" && c.Encryption != "" && c.Encryption != "none" {
 		return fmt.Errorf("vless encryption %q is not supported", c.Encryption)
+	}
+	// The dialer lowercases the VMess cipher, so "NONE" would send plaintext
+	// while the UI, comparing exactly, showed no "unencrypted" warning.
+	// Store the canonical form and refuse ciphers the dialer doesn't know.
+	if c.Protocol == "vmess" {
+		c.Security = strings.ToLower(c.Security)
+		switch c.Security {
+		case "", "auto", "aes-128-gcm", "chacha20-poly1305", "none", "zero":
+		default:
+			return fmt.Errorf("unsupported vmess security %q", c.Security)
+		}
 	}
 	// Short identifier fields are stored and shown in the UI; refuse control
 	// characters so a subscription can't save garbage.

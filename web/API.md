@@ -70,7 +70,7 @@ The mock accepts the password `admin`.
 | POST | `/api/clients` | Client without `id`/`status`/`traffic` | `201 Client` |
 | GET | `/api/clients/:id` | — | `Client` |
 | PUT | `/api/clients/:id` | full Client (the server ignores `status`/`traffic`) | `Client` |
-| DELETE | `/api/clients/:id` | — | `204`. The server also removes the client from groups. Rules that target the client change to `direct`. |
+| DELETE | `/api/clients/:id` | — | `204`. The server also removes the client from groups and deletes the rules that target it. Traffic those rules matched then falls through to the later rules, or to the kill switch if the default rule was one of them. |
 | POST | `/api/clients/:id/toggle` | — | `Client` with `enabled` flipped |
 | POST | `/api/clients/:id/check` | — | `202`. Starts a health check now. The result arrives as a `ping` event (and a `status` event if the state changes). |
 | GET | `/api/clients/:id/link` | — | `{"link": "vless://..."}` (or `vmess://` base64 JSON) |
@@ -119,9 +119,9 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 
 `{"id", "type", "values": ["..."], "target": {"kind", "id"}}`
 
-- `type`: `source` (client IPs or CIDRs), `domain` (sniffed domain. A value also matches its subdomains: `ir` matches `x.ir`), `dest` (destination IP or CIDR, or `:port`), or `default` (matches everything, `values` is `[]`).
+- `type`: `source` (client IPs or CIDRs), `domain` (sniffed domain. A value matches that name and its subdomains: `ir` matches `x.ir`; `*.example.com` matches the subdomains only), `dest` (destination IP or CIDR), or `default` (matches everything, `values` is `[]`).
 - `target.kind`: `client` or `group` (`id` must exist), or `direct` or `block` (`id` is `""`).
-- The server evaluates the rules top to bottom, and the first match decides. When no rule matches, the server applies `settings.killSwitch`.
+- The server evaluates the rules top to bottom, and the first match decides. The `default` rule matches everything, so rules placed after it never match. When no rule matches, the server applies `settings.killSwitch`.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -144,7 +144,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 }
 ```
 
-`GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to `ports.ui` can take effect only after a restart. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`.
+`GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to `ports.ui` can take effect only after a restart. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`. The server also answers `400` when two ports are equal, when `ports.transparent` or `ports.ui` is 0, when `healthInterval` is outside 5–3600, or when `healthUrl` is not an http or https URL (`""` selects the default).
 
 `allowPrivateServers` is off by default. While it is off, untrusted clients (from a subscription or `/api/import`) may not use private (RFC 1918, ULA) or CGNAT server addresses, so a malicious subscription or pasted link cannot aim health checks and connections at LAN devices. Clients saved through `POST /api/clients` or `PUT /api/clients/:id` that have no `subscriptionId` may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
 
@@ -152,7 +152,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 
 - `GET` always returns `"password": ""`, plus `"passwordSet": true|false` to show whether a password is stored.
 - `PUT` with `"password": ""` (or with no `password` field) keeps the stored password. `PUT` with a non-empty value replaces it.
-- The server ignores `passwordSet` on `PUT`. The API cannot clear the stored password.
+- The server ignores `passwordSet` on `PUT`. Changing `url` or `user` without sending a new password clears the stored password; nothing else does.
 
 ## Stats
 

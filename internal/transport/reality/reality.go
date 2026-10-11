@@ -51,6 +51,9 @@ type layer struct {
 	shortID   [8]byte
 }
 
+// spiders limits concurrent spider fetches.
+var spiders = make(chan struct{}, 2)
+
 func init() {
 	transport.Register("reality", New)
 }
@@ -125,7 +128,17 @@ func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if !verified {
 		// A real certificate: we reached the camouflage site, not an Xray
 		// server (MITM or redirection). Behave like a browser, then fail.
-		go spider(u, sni, l.s.SpiderX)
+		// At most two at a time: every failed dial would otherwise start
+		// one, each holding a connection for up to 10 s.
+		select {
+		case spiders <- struct{}{}:
+			go func() {
+				defer func() { <-spiders }()
+				spider(u, sni, l.s.SpiderX)
+			}()
+		default:
+			u.Close()
+		}
 		return nil, errors.New("reality: received real certificate (potential MITM or redirection)")
 	}
 	return ntls.NewConn(u, rec), nil

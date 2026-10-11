@@ -290,3 +290,35 @@ func TestEarlyDataReadDeadline(t *testing.T) {
 		t.Fatalf("%q %v", got, err)
 	}
 }
+
+// Round 8: the handshake deferred to the first Write cleared the conn's
+// deadline when it finished, so a deadline the caller had set to bound its
+// own Read (the DNS forwarder and the health probe do) was lost and the
+// Read could block for ever.
+func TestEarlyDataHandshakeKeepsDeadline(t *testing.T) {
+	reqs := make(chan *http.Request, 1)
+	srv := echoServer(t, reqs)
+	defer srv.Close()
+	c := dial(t, srv, `{"path":"/?ed=64"}`)
+	defer c.Close()
+
+	c.SetDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := c.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	<-reqs
+	got := make([]byte, 2)
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "ok" {
+		t.Fatalf("%q %v", got, err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := c.Read(got); done <- err }()
+	select {
+	case err := <-done:
+		if !isTimeout(err) {
+			t.Fatalf("want timeout, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Read ignored the deadline set before the handshake")
+	}
+}

@@ -3,6 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
+	"strings"
 
 	"github.com/onlymaj/v2ray-client-go/internal/group"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
@@ -22,7 +25,7 @@ func (c *Config) Validate() error {
 	if len(c.Groups) > 200 || len(c.Rules) > 1000 || len(c.Subscriptions) > 100 {
 		return errors.New("too many groups, rules or subscriptions")
 	}
-	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(h) {
+	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(strings.ReplaceAll(h, ":", "")) {
 		return errors.New("routeros certSha256 must be 64 hex characters")
 	}
 	clients := map[string]bool{}
@@ -78,8 +81,46 @@ func (c *Config) Validate() error {
 	default:
 		return fmt.Errorf("unknown kill switch mode %q", c.Settings.KillSwitch)
 	}
-	if c.Settings.HealthInterval < 10 {
-		return errors.New("health interval must be at least 10 seconds")
+	return c.Settings.validate()
+}
+
+// validate refuses settings the listeners, the health checker or the DNS
+// forwarder could not use. A clash between ports would stop the next start
+// with the UI unreachable, so it must never be saved.
+func (s *Settings) validate() error {
+	if s.HealthInterval < 5 || s.HealthInterval > 3600 {
+		return errors.New("healthInterval must be 5-3600 seconds")
+	}
+	p := s.Ports
+	if p.Transparent == 0 || p.UI == 0 {
+		return errors.New("ports.transparent and ports.ui must be 1-65535")
+	}
+	used := map[uint16]string{}
+	for _, x := range []struct {
+		name string
+		port uint16
+	}{{"transparent", p.Transparent}, {"ui", p.UI}, {"socks", p.SOCKS}, {"http", p.HTTP}, {"dns", p.DNS}} {
+		if x.port == 0 {
+			continue
+		}
+		if other := used[x.port]; other != "" {
+			return fmt.Errorf("ports.%s and ports.%s must differ", other, x.name)
+		}
+		used[x.port] = x.name
+	}
+	if ap, err := netip.ParseAddrPort(s.DNSUpstream); err != nil || ap.Port() == 0 {
+		return errors.New("dnsUpstream must be ip:port")
+	}
+	if s.HealthURL != "" { // empty selects the default URL
+		u, err := url.Parse(s.HealthURL)
+		if err != nil || len(s.HealthURL) > 2048 || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
+			return errors.New("healthUrl must be an http or https URL")
+		}
+		if port := u.Port(); port != "" {
+			if ap, err := netip.ParseAddrPort("0.0.0.0:" + port); err != nil || ap.Port() == 0 {
+				return errors.New("healthUrl has a bad port")
+			}
+		}
 	}
 	return nil
 }

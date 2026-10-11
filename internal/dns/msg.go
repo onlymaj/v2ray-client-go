@@ -24,6 +24,7 @@ const (
 	flagTC = 1 << 9
 	flagRD = 1 << 8
 	flagRA = 1 << 7
+	flagCD = 1 << 4
 
 	maxPointers = 64 // guards against pointer loops
 
@@ -287,4 +288,39 @@ func errorResponse(query []byte, rcode int) []byte {
 	binary.BigEndian.PutUint16(out[4:], h.QDCount)
 	clear(out[6:12])
 	return out
+}
+
+// cacheVariant looks at what in query, beyond the question, changes the
+// answer. shared is false when the answer is specific to this query and
+// must not be cached for other clients: checking disabled (CD), or an EDNS
+// Client Subnet option (RFC 7871), which lets the sender choose the network
+// the answer is tailored to. variant separates answers with and without
+// DNSSEC records (the DO bit).
+func cacheVariant(query []byte, h header, q question) (variant string, shared bool) {
+	if h.Flags&flagCD != 0 {
+		return "", false
+	}
+	rrs, err := parseRecords(query, h, q.End)
+	if err != nil {
+		return "", false
+	}
+	for _, r := range rrs {
+		if r.Section != 2 || r.Type != typeOPT {
+			continue
+		}
+		if r.TTL&(1<<15) != 0 {
+			variant = "|do"
+		}
+		for opt := query[r.RDataOff : r.RDataOff+r.RDLen]; len(opt) >= 4; {
+			if binary.BigEndian.Uint16(opt) == 8 { // edns-client-subnet
+				return "", false
+			}
+			n := 4 + int(binary.BigEndian.Uint16(opt[2:]))
+			if n > len(opt) {
+				return "", false
+			}
+			opt = opt[n:]
+		}
+	}
+	return variant, true
 }

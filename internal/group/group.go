@@ -200,6 +200,16 @@ func (s *Selector) name(i int) string {
 // or IP string; only used by sticky with StickyIncludeDest). ok is false
 // when no member is up, so the caller can apply its kill switch.
 func (s *Selector) Pick(src netip.Addr, dst string) (string, bool) {
+	return s.pick(src, dst, true)
+}
+
+// Peek returns what Pick would return next, without moving a round-robin
+// group on to its next member.
+func (s *Selector) Peek(src netip.Addr, dst string) (string, bool) {
+	return s.pick(src, dst, false)
+}
+
+func (s *Selector) pick(src netip.Addr, dst string, advance bool) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.g.Strategy {
@@ -208,7 +218,9 @@ func (s *Selector) Pick(src netip.Addr, dst string) (string, bool) {
 		for k := 0; k < n; k++ {
 			i := (s.rr + k) % n
 			if s.members[i].up {
-				s.rr = i + 1
+				if advance {
+					s.rr = i + 1
+				}
 				return s.members[i].id, true
 			}
 		}

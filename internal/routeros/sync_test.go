@@ -339,3 +339,23 @@ func TestSyncWarnsWithoutPin(t *testing.T) {
 		t.Fatalf("warnings %d, logs %q", n, logs)
 	}
 }
+
+// Round 8: a host name from a subscription could resolve to thousands of
+// addresses, each sent to the router as a firewall address-list entry.
+func TestResolveAllBounds(t *testing.T) {
+	s := New(Options{Resolve: func(_ context.Context, host string) ([]netip.Addr, error) {
+		out := make([]netip.Addr, 500)
+		for i := range out {
+			out[i] = netip.AddrFrom4([4]byte{203, 0, byte(i >> 8), byte(i)})
+		}
+		return out, nil
+	}})
+	cache := map[string][]netip.Addr{}
+	got, err := s.resolveAll(context.Background(), []string{"many.example", "198.51.100.7"}, cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxAddrsPerHost+1 || len(cache["many.example"]) != maxAddrsPerHost {
+		t.Fatalf("kept %d addresses (%d cached), want %d per host", len(got), len(cache["many.example"]), maxAddrsPerHost)
+	}
+}

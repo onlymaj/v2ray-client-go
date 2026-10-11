@@ -13,10 +13,10 @@ Router setup: **[docs/routeros.md](docs/routeros.md)**.
   - SOCKS5 and HTTP CONNECT for single hosts.
   - DNS. Queries are sent as DNS over TCP through the selected client.
 - **Groups:** failover, least-ping, round-robin and sticky. Switching uses hysteresis so a group does not flap between clients.
-- **Rules:** match on source CIDR, destination CIDR, or domain (exact or `*.wildcard`, using TLS SNI or HTTP Host sniffing). Each rule targets a client, a group, `direct` or `block`.
+- **Rules:** match on source CIDR, destination CIDR, or domain (a name with its subdomains, or `*.name` for the subdomains only, using TLS SNI or HTTP Host sniffing). Each rule targets a client, a group, `direct` or `block`.
 - **Health checks** (TCP and real-delay), traffic stats with 24 h / 60 s history, and a live connection table.
 - **Share links and subscriptions:** import and export `vless://` / `vmess://` links and subscription URLs.
-- **RouterOS integration:** keeps the router's `no-proxy` address list (proxy server addresses and direct destinations) in sync through the REST API, so the router's own connections to the proxy servers do not loop through the container. The LAN rules deliberately do not use this list, because subscription data feeds it.
+- **RouterOS integration:** keeps the router's `no-proxy` address list (the proxy server addresses) in sync through the REST API, so the router's own connections to the proxy servers do not loop through the container. The LAN rules deliberately do not use this list, because subscription data feeds it.
 - **Kill switch:** `block` (default) or `direct` when no client is available. It covers IPv4 TCP only.
 
 ### Out of scope
@@ -111,7 +111,7 @@ internal/config/          schema, defaults, validation, atomic JSON store
 internal/inbound/         transparent (SO_ORIGINAL_DST), socks5, http connect, dns
 internal/netfilter/       REDIRECT install via nf_tables netlink or legacy setsockopt
 internal/sniff/           TLS SNI / HTTP Host
-internal/router/          rule engine (CIDR, exact/wildcard domains)
+internal/router/          rule engine (CIDR, domains with subdomains)
 internal/group/           failover, least-ping, round-robin, sticky + hysteresis
 internal/outbound/        Dialer interface + registry, direct
   vless/ vmess/           protocol dialers                       [tags vless, vmess]

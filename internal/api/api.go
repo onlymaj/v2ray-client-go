@@ -310,7 +310,7 @@ func defaultFetch(ctx context.Context, rawURL string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", rawURL, resp.Status)
+		return nil, fmt.Errorf("server answered HTTP %d", resp.StatusCode) // not resp.Status: its text is the server's
 	}
 	const limit = 4 << 20
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))

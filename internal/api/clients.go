@@ -86,6 +86,7 @@ func validateClient(c *config.Client) error {
 	if err := sc.Validate(); err != nil {
 		return errf(http.StatusBadRequest, "%v", err)
 	}
+	c.Security = sc.Security // Validate stores the canonical VMess cipher
 	return nil
 }
 

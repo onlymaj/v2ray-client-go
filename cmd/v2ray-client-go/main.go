@@ -105,7 +105,7 @@ func run() error {
 			return c, dnsRouteKey(dec), err
 		},
 		RouteKey: func(src netip.Addr, qname string, dst netip.Addr) string {
-			return dnsRouteKey(d.Route(src, qname, dst))
+			return dnsRouteKey(d.Preview(src, qname, dst))
 		},
 		// Under DNS Option B the router forwards every LAN query, so they all
 		// arrive from the gateway: give it (and the container itself) a much
