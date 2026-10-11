@@ -18,6 +18,8 @@ type Store struct {
 	mu   sync.Mutex
 	cur  *Config
 	subs []func(*Config)
+
+	notifyMu sync.Mutex // serializes subscriber calls
 }
 
 // Open loads path, or starts from Default() if it doesn't exist yet.
@@ -71,11 +73,19 @@ func (s *Store) Update(fn func(*Config) error) error {
 		return err
 	}
 	s.cur = next
-	subs := append([]func(*Config){}, s.subs...)
 	s.mu.Unlock()
 
+	// Notify one update at a time, always with the latest snapshot: two
+	// overlapping Updates may reach this point in either order, and the last
+	// notification must carry the newest config.
+	s.notifyMu.Lock()
+	defer s.notifyMu.Unlock()
+	s.mu.Lock()
+	cur := s.cur
+	subs := append([]func(*Config){}, s.subs...)
+	s.mu.Unlock()
 	for _, f := range subs {
-		f(next)
+		f(cur)
 	}
 	return nil
 }

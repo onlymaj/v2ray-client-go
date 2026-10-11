@@ -99,6 +99,9 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 		return
 	}
 	defer out.Close()
+	ar := &activeRelay{src: src.Addr(), domain: domain, dstIP: dst.IP, dec: dec, in: conn, out: out}
+	d.relays.add(ar)
+	defer d.relays.remove(ar)
 	if len(head) > 0 {
 		if _, err := out.Write(head); err != nil {
 			return

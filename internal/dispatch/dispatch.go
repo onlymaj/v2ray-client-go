@@ -72,6 +72,8 @@ type Dispatcher struct {
 
 	mu     sync.Mutex // serializes Update and HealthUpdate
 	health map[string]health
+
+	relays relaySet // established relays, re-checked after changes
 }
 
 // New builds a Dispatcher from cfg. tracker may be nil. A non-nil error
@@ -96,6 +98,13 @@ func New(cfg *config.Config, tracker Tracker) (*Dispatcher, error) {
 // are returned too, but the rest of the config is applied and those
 // clients/groups are treated as unavailable (kill switch).
 func (d *Dispatcher) Update(cfg *config.Config) error {
+	err := d.update(cfg)
+	// Cut established relays the new config would route differently.
+	d.recheck(false)
+	return err
+}
+
+func (d *Dispatcher) update(cfg *config.Config) error {
 	eng, err := router.Compile(cfg.Rules)
 	if err != nil {
 		return err
@@ -195,6 +204,15 @@ func (d *Dispatcher) OnGroupChange(f func(groupID, current string)) {
 // group containing the client. Disabled or broken clients are reported
 // down to the groups.
 func (d *Dispatcher) HealthUpdate(clientID string, up bool, delay time.Duration) {
+	d.healthUpdate(clientID, up, delay)
+	if up {
+		// A client recovered: relays that went direct only because of the
+		// kill switch must move back behind the proxy.
+		d.recheck(true)
+	}
+}
+
+func (d *Dispatcher) healthUpdate(clientID string, up bool, delay time.Duration) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.health[clientID] = health{up, delay}

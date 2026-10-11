@@ -125,8 +125,17 @@ func run() error {
 
 	// apply pushes a config snapshot into every component. It runs once at
 	// startup and after every successful Store.Update.
+	// Store.Update calls subscribers after releasing its lock, so two
+	// overlapping saves can deliver snapshots out of order. Serialize applies
+	// and always apply the store's latest snapshot, so a stale one arriving
+	// last can't leave the running state behind what the UI shows (e.g. the
+	// kill switch still "direct" after it was set to "block").
+	var applyMu sync.Mutex
 	prev := cfg
-	apply := func(c *config.Config) {
+	apply := func(*config.Config) {
+		applyMu.Lock()
+		defer applyMu.Unlock()
+		c := store.Get()
 		if err := d.Update(c); err != nil {
 			log.Printf("config: %v", err)
 		}
