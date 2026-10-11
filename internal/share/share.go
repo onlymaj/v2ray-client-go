@@ -124,6 +124,12 @@ func (c *Client) Validate() error {
 	if !validAddress(c.Address) {
 		return fmt.Errorf("invalid address %q", c.Address)
 	}
+	// VLESS encryption (e.g. mlkem768x25519plus) is not implemented. Refuse
+	// it instead of silently sending the header and first payload in the
+	// clear to a server that expects it encrypted.
+	if c.Protocol == "vless" && c.Encryption != "" && c.Encryption != "none" {
+		return fmt.Errorf("vless encryption %q is not supported", c.Encryption)
+	}
 	// Short identifier fields are stored and shown in the UI; refuse control
 	// characters so a subscription can't save garbage.
 	for _, f := range []struct{ name, v string }{
@@ -198,6 +204,12 @@ func ParseVLESS(link string) (Client, error) {
 		return Client{}, errors.New("not a vless link")
 	}
 	q := u.Query()
+	// REALITY post-quantum verification (pqv / mldsa65Verify) is not
+	// implemented: refuse rather than silently drop a check the link's
+	// author asked for.
+	if q.Get("pqv") != "" {
+		return Client{}, errors.New("reality pqv (ML-DSA-65 verification) is not supported")
+	}
 	c := Client{
 		Name:        unescapeName(frag),
 		Protocol:    "vless",

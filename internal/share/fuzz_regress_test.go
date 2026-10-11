@@ -46,3 +46,19 @@ func TestValidateRejectsInvalidUTF8(t *testing.T) {
 		}
 	}
 }
+
+// Regression (round 6): settings the client can't honour must be refused,
+// not silently dropped (VLESS encryption would otherwise go out in clear).
+func TestRefusesUnsupportedSecuritySettings(t *testing.T) {
+	for _, link := range []string{
+		"vless://11111111-2222-3333-4444-555555555555@example.com:443?security=none&encryption=mlkem768x25519plus.native.0rtt.abc",
+		"vless://11111111-2222-3333-4444-555555555555@example.com:443?security=reality&pbk=AAAA&sni=a.com&pqv=xyz",
+	} {
+		if _, err := Parse(link); err == nil {
+			t.Errorf("Parse(%q) accepted an unsupported setting", link)
+		}
+	}
+	if _, err := Parse("vless://11111111-2222-3333-4444-555555555555@example.com:443?security=none&encryption=none"); err != nil {
+		t.Errorf("encryption=none refused: %v", err)
+	}
+}
