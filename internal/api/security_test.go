@@ -553,3 +553,18 @@ func TestTooManyLinksWithUnusableLink(t *testing.T) {
 		t.Fatalf("%d clients saved from an oversized list", n)
 	}
 }
+
+// Round 12: a rule with no values (the UI's "Add rule" with an empty box)
+// was saved with 200 and matched nothing, so a block or direct rule the
+// admin believed in did not exist. web/API.md and the mock already said 400.
+func TestRuleWithoutValuesRefused(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	def := router.Rule{ID: "default", Type: "default", Target: router.Target{Kind: "group", ID: "default"}}
+	for _, vals := range [][]string{nil, {}, {" ", ""}} {
+		e.expect("PUT", "/api/rules", []router.Rule{
+			{Type: "dest", Values: vals, Target: router.Target{Kind: "block"}}, def}, 400, nil)
+	}
+	e.expect("PUT", "/api/rules", []router.Rule{
+		{Type: "dest", Values: []string{"203.0.113.0/24"}, Target: router.Target{Kind: "block"}}, def}, 200, nil)
+}

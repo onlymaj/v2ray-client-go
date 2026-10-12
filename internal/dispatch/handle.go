@@ -162,7 +162,7 @@ func peek(conn net.Conn, buf []byte) (head []byte, domain string, err error) {
 // halfOpenTimeout once one direction has finished.
 type watch struct {
 	a, b   net.Conn
-	last   atomic.Int64 // unix nanos of the last read
+	last   atomic.Int64 // monoNow of the last read
 	limit  atomic.Int64 // nanos
 	silent atomic.Int64 // the silent limit while still in force, else 0
 	once   sync.Once
@@ -193,10 +193,18 @@ func (w *watch) clientActive() {
 	}
 }
 
-func (w *watch) touch() { w.last.Store(time.Now().UnixNano()) }
+// watchBase anchors the watchdog's clock. time.Since reads the monotonic
+// clock, so a wall-clock step (the router has no battery clock and syncs
+// by NTP after start) neither cuts every quiet relay nor holds the limits
+// off for the size of the step.
+var watchBase = time.Now()
+
+func monoNow() int64 { return int64(time.Since(watchBase)) }
+
+func (w *watch) touch() { w.last.Store(monoNow()) }
 
 func (w *watch) check() {
-	left := time.Duration(w.last.Load() + w.limit.Load() - time.Now().UnixNano())
+	left := time.Duration(w.last.Load() + w.limit.Load() - monoNow())
 	if left <= 0 {
 		w.abort()
 		return

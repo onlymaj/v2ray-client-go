@@ -21,8 +21,14 @@ export function Settings() {
   const [err, setErr] = useState(null);
   const [busy, run] = useAction();
 
+  const [saved, setSaved] = useState(null); // routeros url and user as stored on the server
+  const load = (v) => {
+    setS(v);
+    setSaved({ url: v.routeros.url, user: v.routeros.user });
+  };
+
   useEffect(() => {
-    api('/settings').then(setS, (e) => setErr(e.message));
+    api('/settings').then(load, (e) => setErr(e.message));
   }, []);
   if (!s) return <Loading error={err} />;
 
@@ -35,8 +41,12 @@ export function Settings() {
     const { passwordSet, ...routeros } = s.routeros;
     const body = { ...s, ports, healthInterval: Number(s.healthInterval), routeros };
     const out = await run(() => api('/settings', { method: 'PUT', body }), 'Settings saved');
-    if (out) setS(out);
+    if (out) load(out);
   };
+
+  // The server clears the stored password when the URL or user changes, so
+  // that it is never sent to a different host or account.
+  const rosMoved = s.routeros.url !== saved.url || s.routeros.user !== saved.user;
 
   return (
     <form onSubmit={save} className="flex flex-col gap-6">
@@ -118,12 +128,12 @@ export function Settings() {
           <Field label="User">
             <Input value={s.routeros.user} autoComplete="off" onInput={(e) => ros('user', e.currentTarget.value)} required={s.routeros.enabled} />
           </Field>
-          <Field label="Password" hint={s.routeros.passwordSet ? 'Leave empty to keep the current password' : ''}>
+          <Field label="Password" hint={!s.routeros.passwordSet ? '' : rosMoved ? 'URL or user changed: the stored password is cleared on save. Enter it again' : 'Leave empty to keep the current password'}>
             <Input
               type="password"
               autoComplete="new-password"
               value={s.routeros.password || ''}
-              placeholder={s.routeros.passwordSet ? '(unchanged)' : ''}
+              placeholder={s.routeros.passwordSet && !rosMoved ? '(unchanged)' : ''}
               onInput={(e) => ros('password', e.currentTarget.value)}
             />
           </Field>

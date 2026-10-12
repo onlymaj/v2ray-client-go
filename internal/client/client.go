@@ -110,9 +110,12 @@ func Build(c config.Client, opts Options) (*Client, error) {
 		switch {
 		case c.Network == "grpc" && !slices.Contains(alpn, "h2"):
 			alpn = append([]string{"h2"}, alpn...)
-		case len(alpn) > 0:
 		case c.Network == "ws":
+			// Always, whatever the config or link says: the WebSocket
+			// upgrade is HTTP/1.1 and fails if the server picks h2. Xray
+			// forces the same (transport/internet/websocket/dialer.go).
 			alpn = []string{"http/1.1"}
+		case len(alpn) > 0:
 		default:
 			alpn = []string{"h2", "http/1.1"}
 		}

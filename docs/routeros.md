@@ -364,10 +364,16 @@ openssl s_client -connect 172.17.0.1:443 </dev/null 2>/dev/null \
 
 Both must print the same value. The app then rejects any other certificate, even if it is otherwise valid. When you renew or replace the certificate, update the pin, or the sync stops (the container log shows the error).
 
-Configure the same URL, user, password and pin in the UI (Settings → RouterOS), or pass the URL and credentials as `ROS_*` envs (section 5). Check that it works:
+Configure the same URL, user, password and pin in the UI (Settings → RouterOS), or pass the URL and credentials as `ROS_*` envs (section 5). If you later change the URL or the user in the UI, enter the password again: the app clears the stored one so it is never sent to another host or account. Check that it works:
 
 ```routeros
 /ip/firewall/address-list/print where list=no-proxy
+```
+
+If you turn the sync off or change the address-list name, the app stops looking at the old list and the entries it created stay there. The router's own connections to those addresses keep going out direct. Remove them by hand (the app marks its entries with a comment):
+
+```routeros
+/ip/firewall/address-list/remove [find list=no-proxy comment="v2ray-client-go"]
 ```
 
 ## 10. Kill switch

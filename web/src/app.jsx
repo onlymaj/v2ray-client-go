@@ -2,7 +2,7 @@ import { useEffect, useState } from 'preact/hooks';
 import { Activity, Layers, LayoutDashboard, ListOrdered, LogOut, Menu, Server, Settings as SettingsIcon } from 'lucide-react';
 import { api, setUnauthorizedHandler } from './api.js';
 import { live, startLive, stopLive, useLiveTick } from './live.js';
-import { ConfirmHost, Toasts } from './components/common.jsx';
+import { ConfirmHost, Toasts, toast } from './components/common.jsx';
 import { ThemeToggle } from './components/ThemeToggle.jsx';
 import { Button } from './components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from './components/ui/sheet';
@@ -142,7 +142,16 @@ export function App() {
   const section = '/' + (path.split('/')[1] || '');
 
   const logout = async () => {
-    await api('/logout', { method: 'POST' }).catch(() => {});
+    try {
+      await api('/logout', { method: 'POST' });
+    } catch (err) {
+      // The request may never have reached the server: the session and its
+      // cookie would live on behind a login page that looks signed out.
+      if (err.status !== 401) {
+        toast('Logout failed, you are still signed in', 'err');
+        return;
+      }
+    }
     stopLive();
     setAuthed(false);
   };

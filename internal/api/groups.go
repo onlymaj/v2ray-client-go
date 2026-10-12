@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
@@ -140,6 +142,13 @@ func (s *server) putRules(w http.ResponseWriter, r *http.Request) {
 	for i := range rules {
 		if rules[i].ID == "" {
 			rules[i].ID = config.NewID()
+		}
+		// A rule with no values matches nothing: saved, it would look like
+		// a block or direct rule and let the traffic follow later rules.
+		// Checked here and not on load, so an old config still starts.
+		if rules[i].Type != "default" && !slices.ContainsFunc(rules[i].Values, func(v string) bool { return strings.TrimSpace(v) != "" }) {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("rule %d: needs at least one value", i+1))
+			return
 		}
 	}
 	if err := s.update(func(cfg *config.Config) error {

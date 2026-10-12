@@ -93,6 +93,10 @@ func TestDefaults(t *testing.T) {
 		{"grpc forced h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"http/1.1"} },
 			[]any{"h2", "http/1.1"}, "grpc", "authority", "example.com"},
 		{"explicit alpn", func(c *config.Client) { c.ALPN = []string{"http/1.1"} }, []any{"http/1.1"}, "", "", ""},
+		// Round 12: a ws client with alpn h2 offered h2; a server choosing it
+		// broke the HTTP/1.1 upgrade on every dial. Xray forces http/1.1.
+		{"ws forced http/1.1", func(c *config.Client) { c.Network, c.ALPN = "ws", []string{"h2", "http/1.1"} },
+			[]any{"http/1.1"}, "ws", "host", "example.com"},
 	}
 	for _, tc := range cases {
 		clear(got)

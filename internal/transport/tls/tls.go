@@ -26,7 +26,10 @@ type Settings struct {
 	AllowInsecure bool     `json:"allowInsecure"`
 }
 
-type layer struct{ s Settings }
+type layer struct {
+	s  Settings
+	id utls.ClientHelloID
+}
 
 func init() {
 	transport.Register("tls", func(settings []byte) (transport.Layer, error) {
@@ -36,10 +39,13 @@ func init() {
 				return nil, err
 			}
 		}
-		if _, err := Fingerprint(s.Fingerprint); err != nil {
+		// Resolved once per client: "random" must not change browser from
+		// one connection to the next, which no real browser does.
+		id, err := Fingerprint(s.Fingerprint)
+		if err != nil {
 			return nil, err
 		}
-		return &layer{s}, nil
+		return &layer{s, id}, nil
 	})
 }
 
@@ -77,7 +83,7 @@ func ServerNameOr(name string, conn net.Conn) string {
 }
 
 func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
-	id, _ := Fingerprint(l.s.Fingerprint)
+	id := l.id
 	rec := NewRecordConn(conn)
 	u := utls.UClient(rec, &utls.Config{
 		ServerName:         ServerNameOr(l.s.ServerName, conn),

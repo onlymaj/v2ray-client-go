@@ -133,3 +133,17 @@ func TestUpdateRebuildsOnPrivatePolicy(t *testing.T) {
 		t.Fatal("SubscriptionID change did not rebuild the client")
 	}
 }
+
+// Round 12: the relay watchdog compared wall-clock times, so a clock step
+// (the router has no battery clock) cut every quiet relay or held the idle
+// limits off. It now measures from a monotonic base.
+func TestWatchUsesMonotonicClock(t *testing.T) {
+	if n := monoNow(); n < 0 || n > int64(24*time.Hour) {
+		t.Fatalf("monoNow = %d: looks like wall-clock time", n)
+	}
+	var w watch
+	w.touch()
+	if got := w.last.Load(); got > int64(24*time.Hour) {
+		t.Fatalf("touch stored %d: wall-clock time", got)
+	}
+}

@@ -256,7 +256,9 @@ export function mockApi() {
             ports: p, healthUrl: b.healthUrl, healthInterval: iv, killSwitch: b.killSwitch, dnsUpstream: b.dnsUpstream,
             allowPrivateServers: !!b.allowPrivateServers,
             routeros: { enabled: !!r.enabled, url: r.url || '', user: r.user || '', addressList: r.addressList || '',
-              certSha256: r.certSha256 || '', password: r.password ? r.password : prev.password },
+              certSha256: r.certSha256 || '',
+              // As on the server: a new URL or user clears the stored password.
+              password: r.password ? r.password : (r.url || '') !== prev.url || (r.user || '') !== prev.user ? '' : prev.password },
           };
           return publicSettings();
         }],

@@ -143,3 +143,28 @@ func TestRecordConnFraming(t *testing.T) {
 		t.Fatalf("raw %q", buf[:n])
 	}
 }
+
+// Round 12: fingerprint "random" was drawn again for every connection, so
+// one client showed Chrome, Firefox and Safari hellos to the same server
+// seconds apart. It is drawn once per client, as in Xray.
+func TestRandomFingerprintStablePerLayer(t *testing.T) {
+	f, err := transport.Lookup("tls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for range 40 {
+		l, err := f([]byte(`{"fingerprint":"random"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tl := l.(*layer)
+		if tl.id.Client == "" {
+			t.Fatal("no fingerprint stored in the layer")
+		}
+		seen[tl.id.Client] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("random always picked %v", seen)
+	}
+}
