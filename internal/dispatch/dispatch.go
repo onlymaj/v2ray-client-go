@@ -303,10 +303,12 @@ func (d *Dispatcher) route(src netip.Addr, domain string, dst netip.Addr, advanc
 		}
 		id, ok := pick(src, key)
 		if !ok && g.sel.Unknown() {
-			// No member has been checked yet (the first seconds after a
-			// start). That is not "all down": the kill switch in direct
-			// mode would send traffic and DNS out in the clear although
-			// the proxies may be fine. Block until the first result.
+			// No member is up, but some have not been checked yet (the
+			// first seconds after a start, or a client just enabled).
+			// That is not "all down": the kill switch in direct mode
+			// would send traffic and DNS out in the clear although a
+			// proxy may be fine. Block until every usable member has a
+			// result; each gets one within the health check timeout.
 			dec.KillSwitch, dec.Kind = true, KindBlock
 			return dec
 		}

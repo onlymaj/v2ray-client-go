@@ -135,7 +135,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
   "ports": { "transparent": 12345, "socks": 1080, "http": 8118, "dns": 5353, "ui": 8080 },  // 1-65535; socks/http/dns accept 0 = disabled
   "healthUrl": "https://www.gstatic.com/generate_204",
   "healthInterval": 30,          // seconds, 5-3600
-  "killSwitch": "block",         // "block" | "direct" (a group no member of which has been checked yet always blocks)
+  "killSwitch": "block",         // "block" | "direct" (a group with no working member and an enabled member not checked yet always blocks)
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client
   "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",

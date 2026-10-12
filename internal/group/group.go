@@ -257,17 +257,19 @@ func (s *Selector) pick(src netip.Addr, dst string, advance bool) (string, bool)
 
 // Current returns the active member of a failover or least-ping group ("" if
 // none is up). For round-robin and sticky it returns "".
-// Unknown reports whether no member has reported its health yet (right
-// after start, or a group of clients that were just added).
+// Unknown reports whether some member has not reported its health yet
+// (right after start, or a client that was just added or enabled). The
+// caller reports members that can never be used as down, so they do not
+// keep a group unknown.
 func (s *Selector) Unknown() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i := range s.members {
-		if s.members[i].seen {
-			return false
+		if !s.members[i].seen {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 func (s *Selector) Current() string {

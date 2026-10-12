@@ -3,6 +3,7 @@
 package grpc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -216,19 +218,14 @@ func TestDecodeHunksNoPerEntryMemory(t *testing.T) {
 	}
 }
 
-// Round 13: every stalled stream holds a receive window, and the conn caps
-// allow 512 of them: 128 MiB against a 32 MiB heap limit, from four LAN
-// addresses that start downloads and stop reading. Only maxStalled streams
-// may be stalled at once; one that stalls beyond that is ended.
-func TestStalledStreamsCapped(t *testing.T) {
-	const after = 50 * time.Millisecond
-	oldAfter, oldMax := stallAfter.Swap(int64(after)), maxStalled.Swap(2)
-	defer func() { stallAfter.Store(oldAfter); maxStalled.Store(oldMax) }()
+// floodServer answers every stream with 16 KiB messages for as long as the
+// client takes them.
+func floodServer(t *testing.T) (dial func() net.Conn) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	t.Cleanup(func() { ln.Close() })
 	h2 := &http2.Server{}
 	go func() {
 		c, err := ln.Accept()
@@ -248,48 +245,322 @@ func TestStalledStreamsCapped(t *testing.T) {
 		})})
 	}()
 	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
-	var conns []net.Conn
-	for range 3 {
+	return func() net.Conn {
 		c, err := l.(*Client).DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
 			return net.Dial("tcp", ln.Addr().String())
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer c.Close()
-		if _, err := c.Read(make([]byte, 1)); err != nil { // start the call, then stop reading
+		t.Cleanup(func() { c.Close() })
+		if _, err := c.Read(make([]byte, 1)); err != nil { // start the call
 			t.Fatal(err)
 		}
-		conns = append(conns, c)
+		return c
 	}
-	time.Sleep(10 * after)
-	if n := stalled.Load(); n != 2 {
-		t.Fatalf("%d streams counted as stalled, want 2", n)
+}
+
+func slowLimits(t *testing.T, window time.Duration, max int32) {
+	oldW, oldM := slowWindow.Swap(int64(window)), maxSlow.Swap(max)
+	t.Cleanup(func() { slowWindow.Store(oldW); maxSlow.Store(oldM) })
+}
+
+func slowCount() int {
+	slowMu.Lock()
+	defer slowMu.Unlock()
+	return len(slowList)
+}
+
+// Round 13: every stream whose reader stops holds a receive window, and the
+// conn caps allow 512 of them: 128 MiB against a 32 MiB heap limit. Only
+// maxSlow streams may be in that state.
+// Round 14: the stream that is ended is the one slow for the longest, not
+// the newest, so a device cannot hold the slots and have other users'
+// paused downloads cut.
+func TestSlowStreamsCappedOldestEnded(t *testing.T) {
+	slowLimits(t, 100*time.Millisecond, 2)
+	dial := floodServer(t)
+	var conns []net.Conn
+	for range 3 {
+		conns = append(conns, dial()) // read one byte, then nothing
+		time.Sleep(150 * time.Millisecond)
 	}
-	ended := 0
+	time.Sleep(500 * time.Millisecond)
+	if n := slowCount(); n != 2 {
+		t.Fatalf("%d streams counted as slow, want 2", n)
+	}
 	buf := make([]byte, 16<<10)
-	for _, c := range conns {
+	for i, c := range conns {
 		c.SetReadDeadline(time.Now().Add(2 * time.Second))
-		for range 8 { // a stream that was cut returns what it had, then the error
-			if _, err := c.Read(buf); err != nil {
-				if !errors.Is(err, errStalled) {
-					t.Fatalf("stream ended with %v", err)
-				}
-				ended++
+		var err error
+		for range 8 { // a stream that was ended returns what it had, then the error
+			if _, err = c.Read(buf); err != nil {
 				break
 			}
 		}
-	}
-	if ended != 1 {
-		t.Fatalf("%d streams ended, want only the one that stalled over the cap", ended)
+		if i == 0 && !errors.Is(err, errStalled) {
+			t.Fatalf("the stream slow for the longest ended with %v, want errStalled", err)
+		}
+		if i > 0 && err != nil {
+			t.Fatalf("stream %d ended (%v); only the oldest slow one should", i, err)
+		}
 	}
 	for _, c := range conns {
 		c.Close()
 	}
-	for i := 0; stalled.Load() != 0 && i < 100; i++ {
+	for i := 0; slowCount() != 0 && i < 100; i++ {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if n := stalled.Load(); n != 0 {
-		t.Fatalf("stalled count is %d after all streams closed", n)
+	if n := slowCount(); n != 0 {
+		t.Fatalf("%d streams still counted as slow after all closed", n)
+	}
+}
+
+// Round 14: the round-13 cap counted a stream only when one message waited
+// 5 s, so a reader taking one message every few seconds was never counted
+// and still pinned a full window per stream. Slowness is now judged by how
+// much the reader takes while data is waiting. A reader that keeps up is
+// never counted.
+func TestTrickleReadersCountAsSlow(t *testing.T) {
+	slowLimits(t, 100*time.Millisecond, 2)
+	dial := floodServer(t)
+	stop := make(chan struct{})
+	ended := make(chan error, 4)
+	for range 4 { // 16 KiB every 150 ms is far below slowFloor
+		c := dial()
+		go func() {
+			buf := make([]byte, 16<<10)
+			for {
+				select {
+				case <-stop:
+					ended <- nil
+					return
+				case <-time.After(150 * time.Millisecond):
+				}
+				if _, err := c.Read(buf); err != nil {
+					ended <- err
+					return
+				}
+			}
+		}()
+	}
+	fast := dial()
+	fastErr := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32<<10)
+		for {
+			select {
+			case <-stop:
+				fastErr <- nil
+				return
+			default:
+			}
+			if _, err := fast.Read(buf); err != nil {
+				fastErr <- err
+				return
+			}
+		}
+	}()
+	time.Sleep(1500 * time.Millisecond)
+	if n := slowCount(); n > 2 {
+		t.Fatalf("%d streams counted as slow, cap is 2", n)
+	}
+	close(stop)
+	cut := 0
+	for range 4 {
+		if err := <-ended; errors.Is(err, errStalled) {
+			cut++
+		} else if err != nil {
+			t.Fatalf("trickle stream ended with %v", err)
+		}
+	}
+	if cut < 2 {
+		t.Fatalf("%d trickle streams ended, want at least the 2 over the cap", cut)
+	}
+	if err := <-fastErr; err != nil {
+		t.Fatalf("a reader that keeps up was ended: %v", err)
+	}
+}
+
+func hunksOf(t *testing.T, msg []byte) (pieces [][]byte, err error) {
+	t.Helper()
+	err = readHunks(bufio.NewReader(bytes.NewReader(msg)), func(p []byte) error {
+		pieces = append(pieces, p)
+		return nil
+	})
+	return pieces, err
+}
+
+func grpcFrame(body []byte) []byte {
+	return append(binary.BigEndian.AppendUint32([]byte{0}, uint32(len(body))), body...)
+}
+
+// Round 14: the client assembled each message whole before handing it to
+// the reader, so a server could make every stream hold a 1 MiB buffer (and a
+// second one waiting behind a slow reader). Messages are now decoded as they
+// arrive, in pieces of at most readStep.
+func TestReadHunksStreams(t *testing.T) {
+	// MultiHunk {data: "ab", data: "", data: "c"} plus unknown fields 2
+	// (varint 150) and 3 (bytes "zz").
+	got, err := hunksOf(t, grpcFrame([]byte{0x0A, 2, 'a', 'b', 0x10, 0x96, 0x01, 0x0A, 0, 0x1A, 2, 'z', 'z', 0x0A, 1, 'c'}))
+	if err != nil || string(bytes.Join(got, nil)) != "abc" {
+		t.Fatalf("%q %v", got, err)
+	}
+	for _, bad := range [][]byte{{0x0A, 5, 'a'}, {0x0A}, {0x0B}, {0x80}} {
+		if _, err := hunksOf(t, grpcFrame(bad)); err == nil {
+			t.Errorf("% x: want error", bad)
+		}
+	}
+	if _, err := hunksOf(t, nil); err != io.EOF {
+		t.Fatalf("empty stream: %v, want io.EOF", err)
+	}
+	// A full-size message of 1-byte entries: joined into few pieces (round
+	// 10), none over readStep.
+	got, err = hunksOf(t, grpcFrame(bytes.Repeat([]byte{0x0A, 1, 'x'}, maxMessage/3)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0
+	for _, p := range got {
+		if len(p) > readStep {
+			t.Fatalf("piece of %d bytes, limit %d", len(p), readStep)
+		}
+		total += len(p)
+	}
+	if total != maxMessage/3 || len(got) > maxMessage/3/readStep+2 {
+		t.Fatalf("%d bytes in %d pieces", total, len(got))
+	}
+	// One big hunk arrives as pieces while the rest is still on the wire.
+	big := append([]byte{0x0A}, binary.AppendUvarint(nil, 200<<10)...)
+	big = append(big, make([]byte, 200<<10)...)
+	first := 0
+	err = readHunks(bufio.NewReader(bytes.NewReader(grpcFrame(big)[:100<<10])), func(p []byte) error {
+		first += len(p)
+		return nil
+	})
+	if !errors.Is(err, io.ErrUnexpectedEOF) || first < 64<<10 {
+		t.Fatalf("truncated big hunk: %d bytes delivered before %v", first, err)
+	}
+	over := grpcFrame(nil)
+	binary.BigEndian.PutUint32(over[1:], maxMessage+1)
+	if _, err := hunksOf(t, over); err == nil {
+		t.Fatal("message over maxMessage accepted")
+	}
+}
+
+// Round 14: the HTTP/2 client keeps an upload buffer of the server's
+// SETTINGS_MAX_FRAME_SIZE (up to 512 KiB) per stream for the life of the
+// tunnel. Go's own HTTP/2 server advertises 1 MiB. The value is rewritten
+// to 16384 on the way in.
+func TestGuardConnClampsMaxFrameSize(t *testing.T) {
+	settings := []byte{0, 0, 18, 4, 0, 0, 0, 0, 0,
+		0, 3, 0, 0, 0, 100, // MAX_CONCURRENT_STREAMS 100
+		0, 5, 0, 0x10, 0, 0, // MAX_FRAME_SIZE 1 MiB
+		0, 4, 0, 0x10, 0, 0} // INITIAL_WINDOW_SIZE 1 MiB
+	data := []byte{0, 0, 6, 0, 0, 0, 0, 0, 1, 0, 5, 0, 0x10, 0, 0} // DATA that looks like a setting
+	ack := []byte{0, 0, 0, 4, 1, 0, 0, 0, 0}
+	late := []byte{0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 5, 0, 0xff, 0xff, 0xff}
+	in := slices.Concat(settings, data, ack, late)
+	want := slices.Clone(in)
+	copy(want[9+6+2:], []byte{0, 0, 0x40, 0})
+	copy(want[len(want)-4:], []byte{0, 0, 0x40, 0})
+	for _, step := range []int{1, 2, 7, len(in)} {
+		g := &guardConn{}
+		got := slices.Clone(in)
+		for i := 0; i < len(got); i += step {
+			g.scan(got[i:min(i+step, len(got))])
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("step %d:\n got % x\nwant % x", step, got, want)
+		}
+	}
+}
+
+// stallConn stops reading when stall is closed.
+type stallConn struct {
+	net.Conn
+	stall, release chan struct{}
+}
+
+func (c *stallConn) Read(p []byte) (int, error) {
+	select {
+	case <-c.stall:
+		<-c.release
+		return 0, io.EOF
+	default:
+	}
+	return c.Conn.Read(p)
+}
+
+// Round 14: a server that granted large windows and then stopped reading
+// its socket blocked one writer for ever with the connection's write lock
+// held; every later tunnel was handed out on that connection and hung.
+// A write that makes no progress now ends the connection, and the next
+// tunnel dials a new one.
+func TestStalledServerConnIsReplaced(t *testing.T) {
+	old := writeTimeout.Swap(int64(300 * time.Millisecond))
+	defer writeTimeout.Store(old)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	stall, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	h2 := &http2.Server{MaxUploadBufferPerConnection: 256 << 20, MaxUploadBufferPerStream: 256 << 20}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go h2.ServeConn(&stallConn{Conn: c, stall: stall, release: release}, &http2.ServeConnOpts{
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/grpc")
+					w.WriteHeader(http.StatusOK)
+					w.(http.Flusher).Flush()
+					io.Copy(io.Discard, r.Body)
+				})})
+		}
+	}()
+	var dials atomic.Int32
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	dial := func() net.Conn {
+		c, err := cl.DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+			dials.Add(1)
+			return net.Dial("tcp", ln.Addr().String())
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		return c
+	}
+	c := dial()
+	if _, err := c.Write(make([]byte, 1024)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	close(stall) // the server stops reading
+	wrote := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 32<<10)
+		for {
+			if _, err := c.Write(buf); err != nil {
+				wrote <- err
+				return
+			}
+		}
+	}()
+	select {
+	case <-wrote:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writes to a server that stopped reading never failed")
+	}
+	time.Sleep(200 * time.Millisecond) // let the client notice the closed conn
+	dial()
+	if n := dials.Load(); n != 2 {
+		t.Fatalf("%d connections dialed, want a second one after the first wedged", n)
 	}
 }

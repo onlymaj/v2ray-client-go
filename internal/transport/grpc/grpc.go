@@ -26,6 +26,7 @@
 package grpc
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -36,6 +37,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +142,11 @@ func New(settings []byte) (transport.Layer, error) {
 	// The default lets a server send 10 MiB of response headers, kept for
 	// the life of the stream. A gRPC response needs a few hundred bytes.
 	t.MaxHeaderListSize = maxHeaderList
+	// Without this a server that stops reading its socket (but keeps
+	// sending, so the read idle check never fires) blocks one writer for
+	// ever with the connection's write lock held, and every later stream
+	// queues behind it. See guardConn for what happens on the timeout.
+	t.WriteByteTimeout = time.Duration(writeTimeout.Load())
 	c.t = t
 	if c.ua == "" {
 		c.ua = "grpc-go/1.73.0"
@@ -211,10 +218,93 @@ func tunMultiStreamName(s string) string {
 	return url.PathEscape(names[len(names)-1])
 }
 
+// writeTimeout is how long a write to the server may make no progress.
+// Atomic so tests can lower it.
+var writeTimeout atomic.Int64
+
+func init() { writeTimeout.Store(int64(30 * time.Second)) }
+
+// guardConn sits between the HTTP/2 client and the connection to the server.
+//
+// Reading, it rewrites SETTINGS_MAX_FRAME_SIZE in the server's SETTINGS
+// frames to the minimum, 16384. The HTTP/2 client allocates an upload buffer
+// of that size (up to 512 KiB) for every stream and keeps it while the
+// request body is open, which for a tunnel is its whole life: a server
+// advertising 1 MiB, as Go's own HTTP/2 server does, would cost 512 KiB per
+// tunnel. A sender may always use smaller frames than the peer allows.
+//
+// Writing, it closes the connection on any error. The HTTP/2 client only
+// remembers a write error; it would go on handing out streams on a
+// connection that can no longer send.
+type guardConn struct {
+	net.Conn
+	// Frame scanner state; only the HTTP/2 read loop calls Read.
+	hdr      [9]byte
+	nh       int    // header bytes collected
+	left     int    // payload bytes left in the current frame
+	settings bool   // the current frame is SETTINGS (not an ACK)
+	off      int    // offset in the SETTINGS payload
+	id       uint16 // identifier of the setting at off
+}
+
+func (g *guardConn) Read(p []byte) (int, error) {
+	n, err := g.Conn.Read(p)
+	g.scan(p[:n])
+	return n, err
+}
+
+// scan follows the frame boundaries in b (RFC 9113 section 4.1) and patches
+// SETTINGS payloads (section 6.5.1: 2-byte identifier, 4-byte value).
+func (g *guardConn) scan(b []byte) {
+	for len(b) > 0 {
+		if g.nh < len(g.hdr) {
+			k := copy(g.hdr[g.nh:], b)
+			g.nh, b = g.nh+k, b[k:]
+			if g.nh < len(g.hdr) {
+				return
+			}
+			g.left = int(g.hdr[0])<<16 | int(g.hdr[1])<<8 | int(g.hdr[2])
+			g.settings, g.off = g.hdr[3] == 0x4 && g.hdr[4]&0x1 == 0, 0
+			if g.left == 0 {
+				g.nh = 0
+			}
+			continue
+		}
+		k := min(len(b), g.left)
+		if g.settings {
+			for i := range k {
+				switch pos := g.off % 6; pos {
+				case 0:
+					g.id = uint16(b[i]) << 8
+				case 1:
+					g.id |= uint16(b[i])
+				default:
+					if g.id == 0x5 { // SETTINGS_MAX_FRAME_SIZE := 16384
+						b[i] = [4]byte{0, 0, 0x40, 0}[pos-2]
+					}
+				}
+				g.off++
+			}
+		}
+		b, g.left = b[k:], g.left-k
+		if g.left == 0 {
+			g.nh = 0
+		}
+	}
+}
+
+func (g *guardConn) Write(p []byte) (int, error) {
+	n, err := g.Conn.Write(p)
+	if err != nil {
+		g.Conn.Close()
+	}
+	return n, err
+}
+
 // Wrap runs a single tunnel on its own HTTP/2 connection over conn.
 // Closing the returned conn closes conn.
 func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
-	cc, err := c.t.NewClientConn(conn)
+	cc, err := c.t.NewClientConn(&guardConn{Conn: conn})
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
@@ -247,7 +337,7 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		if err != nil {
 			return nil, err
 		}
-		cc, err := c.t.NewClientConn(raw)
+		cc, err := c.t.NewClientConn(&guardConn{Conn: raw})
 		if err != nil {
 			raw.Close()
 			return nil, fmt.Errorf("grpc: %w", err)
@@ -304,8 +394,8 @@ func (c *Client) open(cc *http2.ClientConn, raw net.Conn) (*streamConn, error) {
 	}
 	s := &streamConn{
 		raw: raw, cancel: cancel,
-		done: make(chan struct{}),
-		rch:  make(chan []byte), wch: make(chan []byte),
+		done: make(chan struct{}), cut: make(chan struct{}), wend: make(chan struct{}),
+		rch: make(chan []byte), wch: make(chan []byte),
 		rdl: newDeadline(), wdl: newDeadline(),
 	}
 	go s.writeLoop(pw)
@@ -328,91 +418,154 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 		s.rerr = err
 		return
 	}
-	var stallTimer *time.Timer
+	var b backlog
 	defer func() {
-		if stallTimer != nil {
-			stallTimer.Stop()
+		s.setSlow(false)
+		if b.timer != nil {
+			b.timer.Stop()
+		}
+		select {
+		case <-s.cut: // whatever error the cut surfaced as, say why
+			s.rerr = errStalled
+		default:
 		}
 	}()
+	br := bufio.NewReaderSize(resp.Body, 4<<10)
+	emit := func(data []byte) error { return s.deliver(data, &b) }
 	for {
-		msg, err := readMessage(resp.Body)
+		err := readHunks(br, emit)
 		if err == io.EOF {
 			if serr := statusErr(resp.Trailer); serr != nil {
 				err = serr
 			}
 		}
-		var data []byte
-		if err == nil {
-			data, err = decodeHunks(msg)
-		}
 		if err != nil {
-			s.rerr = err
-			return
-		}
-		if len(data) == 0 {
-			continue
-		}
-		if err := s.deliver(data, &stallTimer); err != nil {
 			s.rerr = err
 			return
 		}
 	}
 }
 
-// A stream whose reader has not taken a message for stallAfter is stalled:
-// it holds a full receive window (streamWindow) plus the message in hand.
-// The cap on open conns allows 512 of them, 128 MiB against a 32 MiB heap
-// limit, and the relay's idle timer does not help (a trickle in the other
-// direction resets it). So only maxStalled streams may be stalled at once,
-// about 8 MiB; a stream that stalls beyond that is ended. Atomics so tests
-// can lower them.
+// Slow readers. HTTP/2 keeps up to streamWindow buffered for a stream whose
+// reader is behind, on top of the message in hand. The cap on open conns
+// allows 512 such streams, 128 MiB against a 32 MiB heap limit, from LAN
+// devices that start downloads and then read slowly or not at all. The
+// relay's idle timer does not help: a trickle in either direction resets it.
+//
+// A stream is slow when, over a slowWindow, data was waiting for the reader
+// at least half the time and the reader took less than slowFloor bytes per
+// second. At most maxSlow streams may be slow at once (about 9 MiB: a
+// window plus a readStep piece or two each). When one more turns slow, the one that has been slow the
+// longest is ended: a device holding many slow streams loses its own first,
+// and cannot keep the slots against others. Readers above the floor are
+// not limited; what they can pin is bounded by the bandwidth they really
+// use (about one second of it).
+const slowFloor = streamWindow // bytes per second
+
+// Atomics so tests can lower them.
 var (
-	stallAfter atomic.Int64 // a time.Duration
-	maxStalled atomic.Int32
-	stalled    atomic.Int32
+	slowWindow atomic.Int64 // a time.Duration
+	maxSlow    atomic.Int32
+
+	slowMu   sync.Mutex
+	slowList []*streamConn // oldest first
 )
 
 func init() {
-	stallAfter.Store(int64(5 * time.Second))
-	maxStalled.Store(32)
+	slowWindow.Store(int64(2 * time.Second))
+	maxSlow.Store(32)
 }
 
-var errStalled = errors.New("grpc: reader stalled and too many streams are stalled")
+var errStalled = errors.New("grpc: stream ended: its reader is too slow and too many streams are waiting for their readers")
 
-// deliver hands data to Read. timer is the caller's, reused across calls.
-func (s *streamConn) deliver(data []byte, timer **time.Timer) error {
+// backlog is readLoop's record of how its reader keeps up.
+type backlog struct {
+	start  time.Time     // start of the current window; zero when the reader is not behind
+	waited time.Duration // time in the window with data waiting for the reader
+	taken  int           // bytes the reader took in the window
+	timer  *time.Timer
+}
+
+// deliver hands data to Read and keeps the slow-reader account.
+func (s *streamConn) deliver(data []byte, b *backlog) error {
 	select {
-	case s.rch <- data:
+	case <-s.cut:
+		return errStalled
+	default:
+	}
+	select {
+	case s.rch <- data: // the reader was waiting: it has caught up
+		if !b.start.IsZero() {
+			b.start = time.Time{}
+			s.setSlow(false)
+		}
 		return nil
 	case <-s.done:
 		return net.ErrClosed
 	default:
 	}
-	after := time.Duration(stallAfter.Load())
-	if *timer == nil {
-		*timer = time.NewTimer(after)
-	} else {
-		(*timer).Reset(after)
+	period := time.Duration(slowWindow.Load())
+	now := time.Now()
+	if b.start.IsZero() {
+		b.start, b.waited, b.taken = now, 0, 0
 	}
-	select {
-	case s.rch <- data:
-		(*timer).Stop()
-		return nil
-	case <-s.done:
-		(*timer).Stop()
-		return net.ErrClosed
-	case <-(*timer).C:
+	for {
+		left := period - now.Sub(b.start)
+		if left <= 0 {
+			elapsed := now.Sub(b.start)
+			s.setSlow(b.waited*2 >= elapsed && int64(b.taken)*int64(time.Second) < slowFloor*int64(elapsed))
+			b.start, b.waited, b.taken = now, 0, 0
+			left = period
+		}
+		if b.timer == nil {
+			b.timer = time.NewTimer(left)
+		} else {
+			b.timer.Reset(left)
+		}
+		select {
+		case s.rch <- data:
+			b.timer.Stop()
+			b.waited += time.Since(now)
+			b.taken += len(data)
+			return nil
+		case <-s.done:
+			b.timer.Stop()
+			return net.ErrClosed
+		case <-s.cut:
+			b.timer.Stop()
+			return errStalled
+		case <-b.timer.C:
+			t := time.Now()
+			b.waited += t.Sub(now)
+			now = t
+		}
 	}
-	if stalled.Add(1) > maxStalled.Load() {
-		stalled.Add(-1)
-		return errStalled
+}
+
+// setSlow adds s to or removes it from the slow streams. Adding one over
+// maxSlow ends the stream that has been slow the longest.
+func (s *streamConn) setSlow(slow bool) {
+	slowMu.Lock()
+	if slow == s.slow || s.ended {
+		slowMu.Unlock()
+		return
 	}
-	defer stalled.Add(-1)
-	select {
-	case s.rch <- data:
-		return nil
-	case <-s.done:
-		return net.ErrClosed
+	s.slow = slow
+	var victim *streamConn
+	if slow {
+		slowList = append(slowList, s)
+		if len(slowList) > int(maxSlow.Load()) {
+			victim = slowList[0]
+			victim.slow, victim.ended = false, true
+			slowList = slices.Delete(slowList, 0, 1)
+		}
+	} else if i := slices.Index(slowList, s); i >= 0 {
+		slowList = slices.Delete(slowList, i, i+1)
+	}
+	slowMu.Unlock()
+	if victim != nil {
+		close(victim.cut) // once: a stream leaves the list when it is cut
+		victim.cancel()   // wakes a readLoop blocked on the response body
 	}
 }
 
@@ -420,6 +573,7 @@ func (s *streamConn) deliver(data []byte, timer **time.Timer) error {
 // The unbuffered wch gives Write backpressure of one message.
 func (s *streamConn) writeLoop(pw *io.PipeWriter) {
 	defer pw.Close()
+	defer close(s.wend)
 	for {
 		select {
 		case msg := <-s.wch:
@@ -454,9 +608,10 @@ func statusErr(h http.Header) error {
 	return nil
 }
 
-// maxMessage bounds a received message. Xray sends one buffer (at most 8 KiB)
-// per Tun message and one MultiBuffer per TunMulti message, so 1 MiB leaves
-// plenty of room while keeping a stream's worst case small on a 32 MiB budget.
+// maxMessage bounds the declared length of a received message. Xray sends
+// one buffer (at most 8 KiB) per Tun message and one MultiBuffer per TunMulti
+// message, so 1 MiB leaves plenty of room. A message is never held whole
+// (see readHunks), so this is not what a stream costs.
 const maxMessage = 1 << 20
 
 // maxChunk bounds the payload of one sent message.
@@ -472,11 +627,16 @@ type streamConn struct {
 	done    chan struct{} // closed by Close
 	once    sync.Once
 
+	cut   chan struct{} // closed when the stream is ended as a slow reader
+	slow  bool          // in slowList; guarded by slowMu
+	ended bool          // cut closed; guarded by slowMu
+
 	rch     chan []byte // from readLoop; closed on end of stream
 	rerr    error       // set by readLoop before closing rch
 	pending []byte      // received data not yet returned by Read
 
-	wch      chan []byte // to writeLoop
+	wch      chan []byte   // to writeLoop
+	wend     chan struct{} // closed when writeLoop returns
 	werr     atomic.Pointer[error]
 	wclosed  bool // CloseWrite done; guarded by wmu
 	wmu      sync.Mutex
@@ -540,6 +700,11 @@ func (s *streamConn) send(msg []byte) error {
 	select {
 	case s.wch <- msg:
 		return nil
+	case <-s.wend: // writeLoop is gone: nothing would ever take msg
+		if err := s.werr.Load(); err != nil {
+			return *err
+		}
+		return io.ErrClosedPipe
 	case <-s.wdl.wait():
 		return os.ErrDeadlineExceeded
 	case <-s.done:
@@ -640,91 +805,121 @@ func encodeHunk(p []byte) []byte {
 	return b
 }
 
-// readMessage reads one gRPC Length-Prefixed-Message and returns its body.
-func readMessage(r io.Reader) ([]byte, error) {
+// readHunks reads one gRPC Length-Prefixed-Message from r and passes the
+// field-1 payloads of its Hunk or MultiHunk to emit, in order, skipping
+// unknown fields (protobuf wire format). The message is decoded as it
+// arrives and never held whole: a server could otherwise make every stream
+// keep a maxMessage buffer, and a second one waiting for the reader. Small
+// entries are joined into pieces of up to readStep bytes, so a message of
+// 1-byte entries does not become one Read (and one packet) per byte. emit
+// owns the slice it is given. io.EOF means the stream ended cleanly before
+// a message.
+func readHunks(r *bufio.Reader, emit func([]byte) error) error {
 	var h [5]byte
 	if _, err := io.ReadFull(r, h[:]); err != nil {
 		if err == io.ErrUnexpectedEOF {
-			return nil, errors.New("grpc: truncated message header")
+			return errors.New("grpc: truncated message header")
 		}
-		return nil, err
+		return err
 	}
 	if h[0] != 0 {
-		return nil, errors.New("grpc: compressed messages not supported")
+		return errors.New("grpc: compressed messages not supported")
 	}
-	n := binary.BigEndian.Uint32(h[1:])
-	if n > maxMessage {
-		return nil, fmt.Errorf("grpc: message too large (%d)", n)
+	left := int(binary.BigEndian.Uint32(h[1:])) // of the message
+	if left > maxMessage {
+		return fmt.Errorf("grpc: message too large (%d)", left)
 	}
-	// Grow the buffer as the body arrives instead of allocating n up front
-	// (otherwise a server could pin maxMessage bytes per stream by sending
-	// only a header), and never past n (a doubling buffer would keep up to
-	// 2n alive).
-	b := make([]byte, 0, min(int(n), readStep))
-	for len(b) < int(n) {
-		if len(b) == cap(b) {
-			nb := make([]byte, len(b), min(int(n), 2*cap(b)))
-			copy(nb, b)
-			b = nb
+	trunc := func(err error) error {
+		if err == io.EOF {
+			err = io.ErrUnexpectedEOF
 		}
-		m, err := io.ReadFull(r, b[len(b):cap(b)])
-		b = b[:len(b)+m]
-		if err != nil {
-			if err == io.EOF {
-				err = io.ErrUnexpectedEOF
+		return fmt.Errorf("grpc: truncated message: %w", err)
+	}
+	uvarint := func() (uint64, error) {
+		var v uint64
+		for shift := uint(0); shift < 64; shift += 7 {
+			if left == 0 {
+				return 0, errors.New("grpc: truncated protobuf")
 			}
-			return nil, fmt.Errorf("grpc: truncated message: %w", err)
+			c, err := r.ReadByte()
+			if err != nil {
+				return 0, trunc(err)
+			}
+			left--
+			v |= uint64(c&0x7f) << shift
+			if c < 0x80 {
+				return v, nil
+			}
 		}
+		return 0, errors.New("grpc: bad protobuf varint")
 	}
-	return b, nil
-}
-
-// readStep is how much of a message body readMessage reads (and so
-// allocates) at a time.
-const readStep = 32 << 10
-
-// decodeHunks returns the field-1 entries of a Hunk or MultiHunk joined in
-// order, skipping unknown fields (protobuf wire format). The entries are
-// moved together inside b and the result aliases it: a slice per entry would
-// let a server turn one message of 1-byte entries into 8 times its size in
-// slice headers.
-func decodeHunks(b []byte) ([]byte, error) {
-	out := b[:0]
-	for len(b) > 0 {
-		tag, n := binary.Uvarint(b)
-		if n <= 0 {
-			return nil, errors.New("grpc: bad protobuf tag")
+	skip := func(n int) error {
+		if n > left {
+			return errors.New("grpc: truncated protobuf")
 		}
-		b = b[n:]
+		left -= n
+		if _, err := r.Discard(n); err != nil {
+			return trunc(err)
+		}
+		return nil
+	}
+	var piece []byte
+	for left > 0 {
+		tag, err := uvarint()
+		if err != nil {
+			return err
+		}
 		switch tag & 7 {
 		case 0: // varint
-			if _, n = binary.Uvarint(b); n <= 0 {
-				return nil, errors.New("grpc: bad protobuf varint")
-			}
-			b = b[n:]
+			_, err = uvarint()
 		case 1: // 64-bit
-			if len(b) < 8 {
-				return nil, errors.New("grpc: truncated protobuf")
-			}
-			b = b[8:]
-		case 2: // length-delimited
-			l, n := binary.Uvarint(b)
-			if n <= 0 || l > uint64(len(b)-n) {
-				return nil, errors.New("grpc: truncated protobuf")
-			}
-			v := b[n : n+int(l)]
-			b = b[n+int(l):]
-			if tag>>3 == 1 {
-				out = append(out, v...) // never ahead of the read position
-			}
+			err = skip(8)
 		case 5: // 32-bit
-			if len(b) < 4 {
-				return nil, errors.New("grpc: truncated protobuf")
+			err = skip(4)
+		case 2: // length-delimited
+			var l uint64
+			if l, err = uvarint(); err != nil {
+				break
 			}
-			b = b[4:]
+			if l > uint64(left) {
+				return errors.New("grpc: truncated protobuf")
+			}
+			if tag>>3 != 1 {
+				err = skip(int(l))
+				break
+			}
+			for n := int(l); n > 0; {
+				if piece == nil {
+					// Never more than what the message can still hold: a
+					// header alone must not make us allocate.
+					piece = make([]byte, 0, min(left, readStep))
+				}
+				k := min(n, cap(piece)-len(piece))
+				if _, err := io.ReadFull(r, piece[len(piece):len(piece)+k]); err != nil {
+					return trunc(err)
+				}
+				piece = piece[:len(piece)+k]
+				n, left = n-k, left-k
+				if len(piece) == cap(piece) {
+					if err := emit(piece); err != nil {
+						return err
+					}
+					piece = nil
+				}
+			}
 		default:
-			return nil, fmt.Errorf("grpc: unsupported protobuf wire type %d", tag&7)
+			return fmt.Errorf("grpc: unsupported protobuf wire type %d", tag&7)
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return out, nil
+	if len(piece) > 0 {
+		return emit(piece)
+	}
+	return nil
 }
+
+// readStep is the largest piece of a message handed to the reader, and so
+// what is allocated at a time.
+const readStep = 32 << 10

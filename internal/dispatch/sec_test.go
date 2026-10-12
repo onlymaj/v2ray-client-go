@@ -164,7 +164,13 @@ func TestKillSwitchDirectBlocksBeforeFirstCheck(t *testing.T) {
 	if got := d.Route(lan, "", other); got.Kind != KindBlock || !got.KillSwitch {
 		t.Fatalf("before any health result: %+v, want a block", got)
 	}
+	// Round 14: one dead member reporting first, or a disabled member in
+	// the group, made the group count as checked while a healthy member
+	// had not been tried yet.
 	d.HealthUpdate("a", false, 0)
+	if got := d.Route(lan, "", other); got.Kind != KindBlock || !got.KillSwitch {
+		t.Fatalf("a down, b not checked yet: %+v, want a block", got)
+	}
 	d.HealthUpdate("b", false, 0)
 	if got := d.Route(lan, "", other); got.Kind != KindDirect || !got.KillSwitch {
 		t.Fatalf("all members checked and down: %+v, want direct", got)
@@ -172,5 +178,25 @@ func TestKillSwitchDirectBlocksBeforeFirstCheck(t *testing.T) {
 	d.HealthUpdate("b", true, time.Millisecond)
 	if got := d.Route(lan, "", other); got.Kind != KindClient || got.ClientID != "b" {
 		t.Fatalf("member up: %+v", got)
+	}
+}
+
+// Round 14: a disabled member counted as "checked", so a group of one
+// enabled client and one disabled client went direct at every start.
+func TestUncheckedGroupWithDisabledMemberBlocks(t *testing.T) {
+	cfg := testConfig()
+	cfg.Settings.KillSwitch = config.KillSwitchDirect
+	cfg.Groups[0].Members = []string{"a", "c"} // c is disabled
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if got := d.Route(lan, "", other); got.Kind != KindBlock || !got.KillSwitch {
+		t.Fatalf("a not checked yet, c disabled: %+v, want a block", got)
+	}
+	d.HealthUpdate("a", false, 0)
+	if got := d.Route(lan, "", other); got.Kind != KindDirect || !got.KillSwitch {
+		t.Fatalf("a checked and down: %+v, want direct", got)
 	}
 }

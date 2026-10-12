@@ -385,7 +385,7 @@ What should happen to proxied traffic when no proxy works? The app and the route
 **Inside the app** (`settings.killSwitch`, for when the container runs but every client in the selected group is down):
 
 - `block` (default): the connection is refused, so proxied TCP does not leak. This covers only what the router sends to the container: UDP (section 7) and IPv6 (unless you followed "IPv6 (required)") never reach it.
-- `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. In the first seconds after a start, before any client of a group has been checked, the connection is refused instead, so a restart does not send traffic out directly while the proxies are fine.
+- `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. While some enabled client of the group has not been checked yet (the first seconds after a start, or after a client is added or enabled) and none is known to work, the connection is refused instead, so a restart does not send traffic out directly while a proxy is fine.
 
 **On the router** (for when the container itself is down or stopped):
 
