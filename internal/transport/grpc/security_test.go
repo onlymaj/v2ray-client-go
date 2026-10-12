@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"github.com/onlymaj/v2ray-client-go/internal/transport"
 	"io"
 	"net"
 	"net/http"
@@ -220,7 +221,7 @@ func TestDecodeHunksNoPerEntryMemory(t *testing.T) {
 
 // floodServer answers every stream with 16 KiB messages for as long as the
 // client takes them.
-func floodServer(t *testing.T) (dial func() net.Conn) {
+func floodServer(t *testing.T) (dial func(src ...string) net.Conn) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -245,8 +246,12 @@ func floodServer(t *testing.T) (dial func() net.Conn) {
 		})})
 	}()
 	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
-	return func() net.Conn {
-		c, err := l.(*Client).DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+	return func(src ...string) net.Conn {
+		ctx := context.Background()
+		if len(src) > 0 {
+			ctx = transport.WithSource(ctx, src[0])
+		}
+		c, err := l.(*Client).DialStream(ctx, func(ctx context.Context) (net.Conn, error) {
 			return net.Dial("tcp", ln.Addr().String())
 		})
 		if err != nil {
@@ -562,5 +567,131 @@ func TestStalledServerConnIsReplaced(t *testing.T) {
 	dial()
 	if n := dials.Load(); n != 2 {
 		t.Fatalf("%d connections dialed, want a second one after the first wedged", n)
+	}
+}
+
+// Round 15: one read that found the reader waiting restarted the window, so
+// a reader that stalled for most of it and then took a few pieces in a
+// burst was never counted, at a fraction of slowFloor.
+func TestBurstReadersCountAsSlow(t *testing.T) {
+	slowLimits(t, 400*time.Millisecond, 2)
+	dial := floodServer(t)
+	stop := make(chan struct{})
+	ended := make(chan error, 4)
+	for range 4 { // 48 KiB every 350 ms, about 137 KiB/s, waiting 90% of the time
+		c := dial()
+		go func() {
+			buf := make([]byte, 16<<10)
+			for {
+				select {
+				case <-stop:
+					ended <- nil
+					return
+				case <-time.After(350 * time.Millisecond):
+				}
+				for range 3 {
+					if _, err := c.Read(buf); err != nil {
+						ended <- err
+						return
+					}
+				}
+			}
+		}()
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if n := slowCount(); n > 2 {
+		t.Fatalf("%d streams counted as slow, cap is 2", n)
+	}
+	close(stop)
+	cut := 0
+	for range 4 {
+		if err := <-ended; errors.Is(err, errStalled) {
+			cut++
+		} else if err != nil {
+			t.Fatalf("burst stream ended with %v", err)
+		}
+	}
+	if cut < 2 {
+		t.Fatalf("%d burst streams ended, want at least the 2 over the cap", cut)
+	}
+}
+
+// Round 15: the stream ended was the oldest slow one of any device, so a
+// device opening many stalled downloads had another device's paused
+// download cut. The device with the most slow streams loses its own.
+func TestSlowCapEndsStreamOfBusiestSource(t *testing.T) {
+	slowLimits(t, 100*time.Millisecond, 3)
+	dial := floodServer(t)
+	phone := dial("192.168.88.10") // slow for the longest
+	time.Sleep(150 * time.Millisecond)
+	var hog []net.Conn
+	for range 3 {
+		hog = append(hog, dial("192.168.88.66"))
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if n := slowCount(); n != 3 {
+		t.Fatalf("%d streams counted as slow, want 3", n)
+	}
+	ends := func(c net.Conn) error {
+		buf := make([]byte, 16<<10)
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		var err error
+		for range 8 { // a stream that was ended returns what it had, then the error
+			if _, err = c.Read(buf); err != nil {
+				break
+			}
+		}
+		return err
+	}
+	if err := ends(phone); err != nil {
+		t.Fatalf("the other device's stream ended: %v", err)
+	}
+	if err := ends(hog[0]); !errors.Is(err, errStalled) {
+		t.Fatalf("the busiest device's oldest slow stream ended with %v, want errStalled", err)
+	}
+	for i, c := range hog[1:] {
+		if err := ends(c); err != nil {
+			t.Fatalf("hog stream %d ended (%v); only one stream is over the cap", i+1, err)
+		}
+	}
+}
+
+// stuckReader returns its bytes and then nothing, like a server that stops
+// sending mid-message. Reading past the end fails the test's wait.
+type stuckReader struct {
+	b    []byte
+	done chan struct{}
+}
+
+func (r *stuckReader) Read(p []byte) (int, error) {
+	if len(r.b) == 0 {
+		close(r.done)
+		select {}
+	}
+	n := copy(p, r.b)
+	r.b = r.b[n:]
+	return n, nil
+}
+
+// Round 15: the header of a message and the two bytes that open a hunk
+// made readHunks allocate a full 32 KiB piece before any payload arrived;
+// 512 streams held 16 MiB for 8 bytes each, outside the slow-reader cap.
+func TestHunkHeaderAloneAllocatesLittle(t *testing.T) {
+	msg := append([]byte{0x0A}, binary.AppendUvarint(nil, 512<<10)...)
+	head := grpcFrame(append(msg, make([]byte, 512<<10)...))[:5+len(msg)+10] // and 10 bytes of payload
+	const n = 16
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range n {
+		r := &stuckReader{b: head, done: make(chan struct{})}
+		go readHunks(bufio.NewReaderSize(r, 4<<10), func([]byte) error { return nil })
+		<-r.done
+	}
+	time.Sleep(50 * time.Millisecond)
+	runtime.ReadMemStats(&after)
+	if d := after.TotalAlloc - before.TotalAlloc; d > n*(12<<10) {
+		t.Fatalf("%d stuck hunk headers allocated %d bytes", n, d)
 	}
 }

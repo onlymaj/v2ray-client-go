@@ -86,7 +86,7 @@ func TestReadStatus(t *testing.T) {
 func TestCheckHTTP(t *testing.T) {
 	p := &fakeProber{delay: 5 * time.Millisecond}
 	c := New(func(string) Prober { return p }, Options{URL: server(t, 204)})
-	c.SetClients([]string{"a"})
+	c.SetClients([]string{"a"}, nil)
 	st := c.CheckNow(context.Background(), "a")
 	if st.State != StateUp || st.TCPMs < 5 || st.DelayMs < 0 || st.LastSuccess.IsZero() || st.LastError != "" {
 		t.Fatalf("status %+v", st)
@@ -116,7 +116,7 @@ func TestTransitionsAndEvents(t *testing.T) {
 		}
 		return nil
 	}, Options{URL: server(t, 200), Bus: bus})
-	c.SetClients([]string{"a"})
+	c.SetClients([]string{"a"}, nil)
 
 	var mu sync.Mutex
 	var order []string
@@ -159,21 +159,21 @@ func TestConcurrencyLimit(t *testing.T) {
 	p.fail.Store(true) // stop after the TCP stage
 	c := New(func(string) Prober { return p }, Options{})
 	ids := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"}
-	c.SetClients(ids)
+	c.SetClients(ids, nil)
 	var wg sync.WaitGroup
 	for _, id := range ids {
 		wg.Go(func() { c.CheckNow(context.Background(), id) })
 	}
 	wg.Wait()
-	if m := maxSeen.Load(); m != maxConcurrent {
-		t.Fatalf("max concurrent = %d, want %d", m, maxConcurrent)
+	if m := maxSeen.Load(); m != maxNow {
+		t.Fatalf("max concurrent = %d, want %d", m, maxNow)
 	}
 }
 
 func TestTimeout(t *testing.T) {
 	p := &fakeProber{delay: time.Second}
 	c := New(func(string) Prober { return p }, Options{Timeout: 20 * time.Millisecond})
-	c.SetClients([]string{"a"})
+	c.SetClients([]string{"a"}, nil)
 	start := time.Now()
 	st := c.CheckNow(context.Background(), "a")
 	if st.State != StateDown || time.Since(start) > 500*time.Millisecond {
@@ -193,7 +193,7 @@ func TestRunSchedules(t *testing.T) {
 	go func() { c.Run(ctx); close(done) }()
 
 	time.Sleep(20 * time.Millisecond)
-	c.SetClients([]string{"new"}) // added after start: checked immediately and then every ~50ms
+	c.SetClients([]string{"new"}, nil) // added after start: checked immediately and then every ~50ms
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	<-done
@@ -206,7 +206,7 @@ func TestRunSchedules(t *testing.T) {
 	if c.Status("new").State != StateUp {
 		t.Fatalf("status %+v", c.Status("new"))
 	}
-	c.SetClients(nil)
+	c.SetClients(nil, nil)
 	if c.Status("new").State != StateUnknown {
 		t.Fatal("removed client should be unknown")
 	}
@@ -227,5 +227,81 @@ func TestParseURL(t *testing.T) {
 		if _, err := parseURL(bad); err == nil {
 			t.Errorf("%q: want error", bad)
 		}
+	}
+}
+
+type errProber struct{ err error }
+
+func (p errProber) DialServer(context.Context) (time.Duration, error) { return 0, p.err }
+func (p errProber) Dial(context.Context, string, outbound.Addr) (net.Conn, error) {
+	return nil, p.err
+}
+
+// Round 15: the error of a failed check can carry text from the server (a
+// 64 KiB WebSocket status line); it was kept whole for every client and
+// sent to the UI. A subscription of 1000 such servers held 64 MiB.
+func TestLastErrorIsClipped(t *testing.T) {
+	p := errProber{errors.New("ws: handshake: bad response " + strings.Repeat("x", 60<<10) + "\xff")}
+	c := New(func(string) Prober { return p }, Options{})
+	c.SetClients([]string{"a"}, nil)
+	st := c.CheckNow(context.Background(), "a")
+	if st.State != StateDown || len(st.LastError) > maxLastError+3 {
+		t.Fatalf("state %s, LastError is %d bytes, limit %d", st.State, len(st.LastError), maxLastError)
+	}
+	if got := c.Status("a").LastError; len(got) > maxLastError+3 {
+		t.Fatalf("stored LastError is %d bytes", len(got))
+	}
+}
+
+// Round 15: clients from a subscription whose servers accept and then stall
+// held all the check slots for the whole timeout, so the admin's own
+// clients were checked once in tens of minutes. Untrusted clients have
+// their own slots, and so has CheckNow.
+func TestStallingUntrustedClientsDoNotStarveOthers(t *testing.T) {
+	stall := &fakeProber{delay: time.Hour}
+	own := &fakeProber{}
+	own.fail.Store(true) // stop after the TCP stage
+	var mu sync.Mutex
+	seen := map[string]bool{}
+	c := New(func(id string) Prober {
+		if strings.HasPrefix(id, "sub") {
+			return stall
+		}
+		return own
+	}, Options{Timeout: 5 * time.Second})
+	c.OnResult(func(id string, st Status) { mu.Lock(); seen[id] = true; mu.Unlock() })
+	ids := []string{"mine"}
+	for i := range 4 * maxConcurrent {
+		ids = append(ids, "sub"+string(rune('a'+i)))
+	}
+	c.SetClients(ids, func(id string) bool { return strings.HasPrefix(id, "sub") })
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	now := make(chan Status, 1)
+	go func() { now <- c.CheckNow(ctx, "mine") }()
+	select {
+	case st := <-now:
+		if st.State != StateDown {
+			t.Fatalf("CheckNow: %+v", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckNow waited behind stalled untrusted clients")
+	}
+	// The scheduled check of "mine" is spread over startSpread.
+	deadline := time.Now().Add(startSpread + 2*time.Second)
+	for {
+		mu.Lock()
+		ok := seen["mine"]
+		mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("own client not checked while untrusted clients stall")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

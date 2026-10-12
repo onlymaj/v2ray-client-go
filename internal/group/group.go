@@ -104,6 +104,17 @@ func New(g Group, onChange func(from, to string)) (*Selector, error) {
 
 func (s *Selector) Group() Group { return s.g }
 
+// Forget marks a member that was reported down as not checked yet (see
+// Unknown): a client that was disabled and is enabled again. Unknown IDs
+// and members that are up are left alone.
+func (s *Selector) Forget(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i, ok := s.index[id]; ok && !s.members[i].up {
+		s.members[i].seen = false
+	}
+}
+
 // Update records a health-check result for a member. Unknown IDs are ignored.
 func (s *Selector) Update(id string, up bool, delay time.Duration) {
 	s.mu.Lock()

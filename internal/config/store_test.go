@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
 	"os"
 	"path/filepath"
@@ -121,5 +122,19 @@ func TestRemoveClientDropsRulesAfterDefault(t *testing.T) {
 	c.RemoveClient("x")
 	if len(c.Rules) != 1 || c.Rules[0].ID != "a" {
 		t.Fatalf("rules after removal: %+v", c.Rules)
+	}
+}
+
+// Round 15: encoding/json wrote '<', '>' and '&' as six bytes each, so a
+// subscription of names made of them became a config six times its size.
+func TestStoreDoesNotEscapeHTML(t *testing.T) {
+	c := &Config{Clients: []Client{{ID: "a", Name: "<&>"}}}
+	data, err := marshal(c, "  ")
+	if err != nil || !bytes.Contains(data, []byte(`"<&>"`)) {
+		t.Fatalf("marshal: %v\n%s", err, data)
+	}
+	got, err := clone(c)
+	if err != nil || got.Clients[0].Name != "<&>" {
+		t.Fatalf("clone: %v %+v", err, got)
 	}
 }

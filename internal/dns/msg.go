@@ -295,10 +295,13 @@ func errorResponse(query []byte, rcode int) []byte {
 // must not be cached for other clients: checking disabled (CD), an EDNS
 // Client Subnet option (RFC 7871), which lets the sender choose the network
 // the answer is tailored to, or a COOKIE option (RFC 7873), which the
-// upstream echoes and another client would reject. variant separates answers with and without
-// DNSSEC records (the DO bit).
+// upstream echoes and another client would reject. Any other option the
+// forwarder does not know to be neutral is treated the same way (round 15:
+// filtering resolvers tailor answers by private-use options), and so is a
+// query that is not a plain recursive QUERY. variant separates answers with
+// and without DNSSEC records (the DO bit).
 func cacheVariant(query []byte, h header, q question) (variant string, shared bool) {
-	if h.Flags&flagCD != 0 {
+	if h.Flags&flagCD != 0 || h.Flags&flagRD == 0 || h.Flags&0x7800 != 0 { // 0x7800: opcode
 		return "", false
 	}
 	rrs, err := parseRecords(query, h, q.End)
@@ -313,7 +316,9 @@ func cacheVariant(query []byte, h header, q question) (variant string, shared bo
 			variant = "|do"
 		}
 		for opt := query[r.RDataOff : r.RDataOff+r.RDLen]; len(opt) >= 4; {
-			if code := binary.BigEndian.Uint16(opt); code == 8 || code == 10 { // client subnet, cookie
+			switch binary.BigEndian.Uint16(opt) {
+			case 3, 5, 6, 7, 11, 12: // NSID, DAU, DHU, N3U, keepalive, padding
+			default: // client subnet (8), cookie (10), anything unknown
 				return "", false
 			}
 			n := 4 + int(binary.BigEndian.Uint16(opt[2:]))

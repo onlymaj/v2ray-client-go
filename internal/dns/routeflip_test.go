@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 )
@@ -60,5 +61,43 @@ func TestRouteFlipNotPooledOrCached(t *testing.T) {
 	s.handle(ctx, src, q2)
 	if n := dials.Load(); n != 2 {
 		t.Fatalf("dials %d, want 2 (matching route must reuse the pooled conn)", n)
+	}
+}
+
+// Round 15: a query in flight when the config was applied finished after
+// the flush, so its answer was cached (up to an hour) and its connection
+// pooled although both came through the old server of a client whose
+// address had just been changed (same route key).
+func TestInFlightQueryAcrossFlushNotPooledOrCached(t *testing.T) {
+	up := newFakeUpstream(t)
+	up.delay = 200 * time.Millisecond
+	s := New(Options{
+		Upstream: up.ln.Addr().String(),
+		Dial:     directDial(&dialRecord{}),
+		RouteKey: func(netip.Addr, string, netip.Addr) string { return "proxy" },
+	})
+	t.Cleanup(s.closeIdle)
+	ctx := context.Background()
+	src := netip.MustParseAddr("10.0.0.1")
+	q := buildQuery(1, "inflight.example", typeA, 0)
+
+	done := make(chan int, 1)
+	go func() { done <- rcodeOf(t, s.handle(ctx, src, q)) }()
+	time.Sleep(50 * time.Millisecond)
+	s.SetUpstream(up.ln.Addr().String()) // what apply does on every config change
+	s.Flush()
+	if rc := <-done; rc != rcodeNoError {
+		t.Fatalf("in-flight query rcode %d", rc)
+	}
+	s.handle(ctx, src, q)
+	if n := up.queries.Load(); n != 2 {
+		t.Fatalf("upstream queries %d, want 2 (answer from before the flush must not be cached)", n)
+	}
+	if n := up.conns.Load(); n != 2 {
+		t.Fatalf("upstream conns %d, want 2 (conn from before the flush must not be pooled)", n)
+	}
+	s.handle(ctx, src, q)
+	if n := up.queries.Load(); n != 2 {
+		t.Fatalf("upstream queries %d, want 2 (later answers are cached again)", n)
 	}
 }

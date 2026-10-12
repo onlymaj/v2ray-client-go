@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,7 +30,8 @@ const (
 	DefaultURL      = "https://www.gstatic.com/generate_204"
 	DefaultInterval = 60 * time.Second
 	DefaultTimeout  = 10 * time.Second
-	maxConcurrent   = 4
+	maxConcurrent   = 4 // per lane, see SetClients
+	maxNow          = 2
 	startSpread     = 5 * time.Second
 )
 
@@ -69,6 +71,7 @@ type entry struct {
 	st      Status
 	next    time.Time // zero = schedule when Run starts
 	running bool
+	low     bool // untrusted: checked in its own lane
 }
 
 // Checker schedules and runs checks. Safe for concurrent use.
@@ -76,7 +79,9 @@ type Checker struct {
 	lookup  func(clientID string) Prober
 	bus     *events.Bus
 	timeout time.Duration
-	sem     chan struct{}
+	sem     chan struct{} // scheduled checks of the admin's own clients
+	lowSem  chan struct{} // scheduled checks of untrusted clients
+	nowSem  chan struct{} // CheckNow
 	wake    chan struct{}
 
 	mu       sync.Mutex
@@ -94,6 +99,8 @@ func New(lookup func(clientID string) Prober, opts Options) *Checker {
 		bus:      opts.Bus,
 		timeout:  opts.Timeout,
 		sem:      make(chan struct{}, maxConcurrent),
+		lowSem:   make(chan struct{}, maxConcurrent),
+		nowSem:   make(chan struct{}, maxNow),
 		wake:     make(chan struct{}, 1),
 		interval: DefaultInterval,
 		clients:  map[string]*entry{},
@@ -140,18 +147,26 @@ func (c *Checker) SetURL(u string) error {
 // SetClients replaces the set of checked (enabled) clients. Clients new to
 // the set are checked immediately once Run is running; removed clients lose
 // their status.
-func (c *Checker) SetClients(ids []string) {
+//
+// low (may be nil) reports the clients that came from a subscription or a
+// pasted link. Their scheduled checks have their own concurrency limit:
+// a subscription can add a thousand servers that accept and then stall,
+// each holding a slot for the whole timeout, and the admin's own clients
+// must not wait behind them (round 15).
+func (c *Checker) SetClients(ids []string, low func(id string) bool) {
 	c.mu.Lock()
 	keep := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		keep[id] = true
-		if c.clients[id] == nil {
-			e := &entry{st: Status{State: StateUnknown, TCPMs: -1, DelayMs: -1}}
+		e := c.clients[id]
+		if e == nil {
+			e = &entry{st: Status{State: StateUnknown, TCPMs: -1, DelayMs: -1}}
 			if c.started {
 				e.next = time.Now()
 			}
 			c.clients[id] = e
 		}
+		e.low = low != nil && low(id)
 	}
 	for id := range c.clients {
 		if !keep[id] {
@@ -225,16 +240,23 @@ func (c *Checker) Run(ctx context.Context) {
 	}
 }
 
-// CheckNow runs a check for id right away (subject to the concurrency
-// limit), waits for it and returns the new status. It reports StateUnknown
+// CheckNow runs a check for id right away (subject to its own concurrency
+// limit, so it does not wait behind the scheduled checks), waits for it and
+// returns the new status. It reports StateUnknown
 // for a client that lookup does not know.
 func (c *Checker) CheckNow(ctx context.Context, id string) Status {
-	return c.check(ctx, id)
+	return c.check(ctx, id, c.nowSem)
 }
 
 // run is a scheduled check; it reschedules the client when done.
 func (c *Checker) run(ctx context.Context, id string) {
-	c.check(ctx, id)
+	sem := c.sem
+	c.mu.Lock()
+	if e := c.clients[id]; e != nil && e.low {
+		sem = c.lowSem
+	}
+	c.mu.Unlock()
+	c.check(ctx, id, sem)
 	c.mu.Lock()
 	if e := c.clients[id]; e != nil {
 		e.running = false
@@ -246,13 +268,13 @@ func (c *Checker) run(ctx context.Context, id string) {
 	c.poke()
 }
 
-func (c *Checker) check(ctx context.Context, id string) Status {
+func (c *Checker) check(ctx context.Context, id string, sem chan struct{}) Status {
 	p := c.lookup(id)
 	if p == nil {
 		return c.Status(id)
 	}
 	select {
-	case c.sem <- struct{}{}:
+	case sem <- struct{}{}:
 	case <-ctx.Done():
 		return c.Status(id)
 	}
@@ -272,10 +294,12 @@ func (c *Checker) check(ctx context.Context, id string) Status {
 		}
 	}
 	cancel()
-	<-c.sem
+	<-sem
 	if err != nil {
 		st.State = StateDown
-		st.LastError = err.Error()
+		// The text can come from the server (a WebSocket status line, a
+		// gRPC message) and is kept per client and sent to the UI.
+		st.LastError = clip(err.Error(), maxLastError)
 		if ctx.Err() != nil {
 			return c.Status(id) // shutting down; don't record
 		}
@@ -318,6 +342,17 @@ type statusEvent struct {
 	ID        string `json:"id"`
 	State     string `json:"state"`
 	LastError string `json:"lastError"`
+}
+
+// maxLastError bounds Status.LastError.
+const maxLastError = 300
+
+// clip cuts s to at most n bytes of valid UTF-8.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return strings.ToValidUTF8(s, "")
+	}
+	return strings.ToValidUTF8(s[:n], "") + "..."
 }
 
 func ms(d time.Duration) int {

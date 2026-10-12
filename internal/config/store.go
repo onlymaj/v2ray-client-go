@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,7 +104,7 @@ func (s *Store) OnChange(f func(*Config)) {
 }
 
 func (s *Store) write(c *Config) error {
-	data, err := json.MarshalIndent(c, "", "  ")
+	data, err := marshal(c, "  ")
 	if err != nil {
 		return err
 	}
@@ -131,10 +132,24 @@ func (s *Store) write(c *Config) error {
 }
 
 func clone(c *Config) (*Config, error) {
-	data, err := json.Marshal(c)
+	data, err := marshal(c, "")
 	if err != nil {
 		return nil, err
 	}
 	out := &Config{}
 	return out, json.Unmarshal(data, out)
+}
+
+// marshal encodes c without HTML escaping: encoding/json would write each
+// '<', '>' and '&' as six bytes, so a subscription of names made of them
+// became a config six times its size, rewritten on every save.
+func marshal(c *Config, indent string) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", indent)
+	if err := enc.Encode(c); err != nil {
+		return nil, err
+	}
+	return b.Bytes(), nil
 }

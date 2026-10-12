@@ -160,6 +160,15 @@ func (c *chunkCodec) seal(dst, p []byte) ([]byte, error) {
 	return dst, nil
 }
 
+// maxChunkIn bounds the payload of a received chunk. The size field allows
+// 64 KiB and is only masked, not authenticated, and the buffer is allocated
+// before the body arrives: a server (or, without TLS, anyone on the path)
+// could make every connection hold 64 KiB for two bytes. The VMess spec
+// caps a chunk at 2^14 and Xray never sends more than 8 KiB.
+const maxChunkIn = 1 << 14
+
+var errChunkTooLarge = errors.New("vmess: chunk too large")
+
 // open reads one chunk from r and returns its plaintext; io.EOF marks the
 // end-of-stream chunk. buf is reused when large enough.
 func (c *chunkCodec) open(r io.Reader, buf []byte) ([]byte, error) {
@@ -171,6 +180,9 @@ func (c *chunkCodec) open(r io.Reader, buf []byte) ([]byte, error) {
 		size := int(binary.BigEndian.Uint16(sb[:]) ^ c.mask())
 		if size == 0 {
 			return nil, io.EOF
+		}
+		if size > maxChunkIn {
+			return nil, errChunkTooLarge
 		}
 		if cap(buf) < size {
 			buf = make([]byte, size)
@@ -185,6 +197,9 @@ func (c *chunkCodec) open(r io.Reader, buf []byte) ([]byte, error) {
 		return nil, io.EOF
 	} else if size < c.overhead()+pad {
 		return nil, errors.New("vmess: invalid chunk size")
+	}
+	if size > maxChunkIn+c.overhead()+pad {
+		return nil, errChunkTooLarge
 	}
 	if cap(buf) < size {
 		buf = make([]byte, size)

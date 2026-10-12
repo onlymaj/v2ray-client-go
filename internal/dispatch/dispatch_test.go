@@ -139,6 +139,10 @@ func TestRoute(t *testing.T) {
 	if d.GroupCurrent("g1") != "a" {
 		t.Error("group state lost on update")
 	}
+	// A result from before c was disabled does not count (round 15): the
+	// group waits for c's first check.
+	check("enabled c, not checked yet", lan, "g2.test", other, Decision{RuleID: "r-g2", Kind: KindBlock, GroupID: "g2", KillSwitch: true})
+	d.HealthUpdate("c", true, 30*time.Millisecond)
 	check("enabled c via group", lan, "g2.test", other, Decision{RuleID: "r-g2", Kind: KindClient, ClientID: "c", GroupID: "g2"})
 	check("kill direct", lan, "unknown.test", other, Decision{RuleID: "r-unknown", Kind: KindDirect, KillSwitch: true})
 

@@ -601,3 +601,16 @@ func TestExamplePasswordRefusedAndFailedLoginsLogged(t *testing.T) {
 		}
 	}
 }
+
+// Round 15: the subscription body was capped but response headers were
+// not (10 MB by default, on every redirect hop).
+func TestFetchRefusesLargeHeaders(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Fill", strings.Repeat("x", 1<<20))
+		w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	if b, err := defaultFetch(context.Background(), srv.URL); err == nil {
+		t.Fatalf("fetch with 1 MiB of response headers succeeded (%d bytes)", len(b))
+	}
+}

@@ -429,3 +429,25 @@ func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 	}
 	return client, server
 }
+
+// Round 15: the chunk buffer was allocated from the 2-byte size field (up to
+// 64 KiB, masked but not authenticated) before the body arrived, so a
+// server could make every connection hold 64 KiB for two bytes.
+func TestOversizedChunkRefusedBeforeAllocating(t *testing.T) {
+	for name, sec := range securities {
+		key, iv := make([]byte, 16), make([]byte, 16)
+		dec := newChunkCodec(sec, key, iv, optChunkStream) // no masking: the size is on the wire as is
+		if _, err := dec.open(bytes.NewReader([]byte{0xff, 0xff}), nil); err != errChunkTooLarge {
+			t.Errorf("%s: 64 KiB chunk header gave %v, want errChunkTooLarge", name, err)
+		}
+		enc, dec := newChunkCodec(sec, key, iv, optChunkStream), newChunkCodec(sec, key, iv, optChunkStream)
+		m := make([]byte, maxChunkIn)
+		wire, err := enc.seal(nil, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := dec.open(bytes.NewReader(wire), nil); err != nil || len(got) != maxChunkIn {
+			t.Errorf("%s: chunk at the limit: len %d err %v", name, len(got), err)
+		}
+	}
+}

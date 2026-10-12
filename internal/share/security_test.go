@@ -85,6 +85,18 @@ func TestFieldLengthLimit(t *testing.T) {
 	}
 }
 
+// Round 15: a name could be 1 KiB, so 1000 links from a subscription put a
+// megabyte of names (six after JSON escaping) in every config save.
+func TestNameLengthLimit(t *testing.T) {
+	link := "vless://" + secUUID + "@h.example.com:443?type=tcp#"
+	if _, err := Parse(link + strings.Repeat("a", maxNameLen+1)); err == nil {
+		t.Error("over-long name accepted")
+	}
+	if _, err := Parse(link + strings.Repeat("a", maxNameLen)); err != nil {
+		t.Errorf("name at the limit refused: %v", err)
+	}
+}
+
 // Round 9: ParseBulk split the whole body into lines before counting
 // links, so a 4 MB body of newlines (a few KB gzipped from a subscription
 // server) allocated about 76 MB against a 32 MB memory limit.

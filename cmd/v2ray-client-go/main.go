@@ -132,7 +132,6 @@ func run() error {
 	// last can't leave the running state behind what the UI shows (e.g. the
 	// kill switch still "direct" after it was set to "block").
 	var applyMu sync.Mutex
-	prev := cfg
 	apply := func(*config.Config) {
 		applyMu.Lock()
 		defer applyMu.Unlock()
@@ -151,7 +150,10 @@ func run() error {
 				servers = append(servers, cl.Address)
 			}
 		}
-		checker.SetClients(enabled)
+		checker.SetClients(enabled, func(id string) bool {
+			cl := c.Client(id)
+			return cl != nil && (cl.Untrusted || cl.SubscriptionID != "")
+		})
 		checker.SetInterval(time.Duration(c.Settings.HealthInterval) * time.Second)
 		if err := checker.SetURL(c.Settings.HealthURL); err != nil {
 			log.Printf("health url: %v", err)
@@ -168,17 +170,18 @@ func run() error {
 		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList, r.CertSHA256)
 		ros.SetServers(servers)
 
-		for _, old := range prev.Clients {
-			if c.Client(old.ID) == nil {
-				st.Forget("client:" + old.ID)
+		// Not only the clients and groups this change removed: a health
+		// result or a connection routed on the old snapshot can recreate
+		// the counters of one removed earlier (round 15).
+		st.Retain(func(key string) bool {
+			if id, ok := strings.CutPrefix(key, "client:"); ok {
+				return id == stats.Direct || c.Client(id) != nil
 			}
-		}
-		for _, old := range prev.Groups {
-			if c.Group(old.ID) == nil {
-				st.Forget("group:" + old.ID)
+			if id, ok := strings.CutPrefix(key, "group:"); ok {
+				return c.Group(id) != nil
 			}
-		}
-		prev = c
+			return true
+		})
 	}
 	apply(cfg)
 	store.OnChange(apply)

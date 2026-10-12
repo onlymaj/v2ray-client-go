@@ -126,6 +126,17 @@ func (s *Stats) Forget(key string) {
 	s.mu.Unlock()
 }
 
+// Retain drops every target for which keep reports false.
+func (s *Stats) Retain(keep func(key string) bool) {
+	s.mu.Lock()
+	for key := range s.targets {
+		if !keep(key) {
+			delete(s.targets, key)
+		}
+	}
+	s.mu.Unlock()
+}
+
 // Conn is a tracked connection.
 type Conn struct {
 	s       *Stats
@@ -265,6 +276,11 @@ func (s *Stats) RecordDelay(clientID string, ms float64) {
 	defer s.mu.Unlock()
 	t := s.getLocked("client:" + clientID)
 	if t.delay == nil {
+		if ms < 0 {
+			// No history to keep for a client that has never answered:
+			// a subscription can hold a thousand dead servers.
+			return
+		}
 		t.delay = new([minPoints]float32)
 		for i := range t.delay {
 			t.delay[i] = float32(math.NaN())

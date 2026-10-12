@@ -322,6 +322,7 @@ add chain=dstnat action=dst-nat in-interface-list=LAN protocol=tcp dst-port=53 \
 - LAN clients keep using the router (the defconf DHCP server hands it out). They keep the router's cache and static entries, and the router's own lookups are also protected.
 - **The container must then not use the router as its resolver.** Otherwise the router asks the container, the container asks the router, and so on. Recreate the container with `dns=` set to a public resolver, for example `dns=1.1.1.1`. That traffic goes out directly because it comes from the container. The container only resolves proxy server and subscription hostnames there.
 - Those lookups are plain UDP, so your ISP sees which proxy hostnames you use and can block or poison them. With option B, **enter proxy servers by IP address**, not hostname.
+- **`source` rules do not apply to DNS with option B.** Every query reaches the container from the router (172.17.0.1), not from the device, so a rule for a device's address never matches its lookups: they follow the rules for the router's address, usually the default rule. If the default is `direct` and a `source` rule proxies one device, that device's lookups go out directly. Use option A when you have `source` rules.
 - If the container is down, the router cannot resolve any names at all: no NTP and no updates. Option A breaks only LAN DNS. You can add a second server (`servers=172.17.0.2,1.1.1.1`), but RouterOS may query both, which leaks lookups.
 
 In both options the router's input firewall must accept DNS from LAN (defconf already does). For option A, the forward chain must allow LAN → 172.17.0.2:53. Defconf allows that.
@@ -385,7 +386,7 @@ What should happen to proxied traffic when no proxy works? The app and the route
 **Inside the app** (`settings.killSwitch`, for when the container runs but every client in the selected group is down):
 
 - `block` (default): the connection is refused, so proxied TCP does not leak. This covers only what the router sends to the container: UDP (section 7) and IPv6 (unless you followed "IPv6 (required)") never reach it.
-- `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. While some enabled client of the group has not been checked yet (the first seconds after a start, or after a client is added or enabled) and none is known to work, the connection is refused instead, so a restart does not send traffic out directly while a proxy is fine.
+- `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. While some enabled client of the group has not been checked yet (the first seconds after a start, or after a client is added or enabled) and none is known to work, the connection is refused instead, so a restart does not send traffic out directly while a proxy is fine. A client that was disabled counts as not checked when it is enabled again.
 
 **On the router** (for when the container itself is down or stopped):
 

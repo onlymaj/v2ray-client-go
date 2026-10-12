@@ -276,3 +276,26 @@ func TestEvent(t *testing.T) {
 		t.Fatalf("got  %s\nwant %s", js, want)
 	}
 }
+
+// Round 15: every checked client got a 1440-point delay ring on its first
+// result, even one that never answered (5.76 KB each, 1000 from one
+// subscription), and a result or connection arriving after a client was
+// removed recreated its counters for good.
+func TestDeadClientsKeepNoDelayRingAndRetain(t *testing.T) {
+	s := New(nil)
+	s.RecordDelay("dead", -1)
+	if tg := s.get("client:dead"); tg.delay != nil {
+		t.Fatal("a client that never answered has a delay ring")
+	}
+	s.RecordDelay("gone", 20)
+	s.Open(src, "d", "", "r", "kept", "g-gone").Close()
+	s.Open(src, "d", "", "r", "", "g-kept").Close()
+	s.Retain(func(key string) bool {
+		return key == "client:kept" || key == "client:"+Direct || key == "group:g-kept"
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.targets) != 3 || s.targets["client:kept"] == nil || s.targets["client:"+Direct] == nil || s.targets["group:g-kept"] == nil {
+		t.Fatalf("targets after Retain: %d", len(s.targets))
+	}
+}

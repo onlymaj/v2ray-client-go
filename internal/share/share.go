@@ -85,6 +85,9 @@ func (c Client) Link() (string, error) {
 // maxFieldLen bounds every free-text field of a client.
 const maxFieldLen = 1024
 
+// maxNameLen bounds a client's name.
+const maxNameLen = 256
+
 // Validate checks that c has the fields every dialer needs and only uses
 // supported transports.
 func (c *Client) Validate() error {
@@ -131,6 +134,11 @@ func (c *Client) Validate() error {
 		if len(v) > maxFieldLen {
 			return fmt.Errorf("field too long (%d bytes, limit %d)", len(v), maxFieldLen)
 		}
+	}
+	// The name is shown, not used: it needs far less, and 1000 clients with
+	// 1 KiB names are a megabyte in every config save and client list.
+	if len(c.Name) > maxNameLen {
+		return fmt.Errorf("name too long (%d bytes, limit %d)", len(c.Name), maxNameLen)
 	}
 	if len(c.ALPN) > 8 {
 		return errors.New("too many alpn values")

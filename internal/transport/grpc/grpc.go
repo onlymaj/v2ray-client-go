@@ -308,7 +308,7 @@ func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
-	s, err := c.open(cc, conn)
+	s, err := c.open(cc, conn, transport.Source(ctx))
 	if err != nil {
 		cc.Close()
 		return nil, err
@@ -348,7 +348,7 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		}
 		c.cc, c.raw = cc, raw
 	}
-	s, err := c.open(c.cc, c.raw)
+	s, err := c.open(c.cc, c.raw, transport.Source(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func (c *Client) Close() error {
 // open starts the streaming call. RoundTrip runs in the background because
 // the server may send response headers only after the client's first
 // message (grpc-go sends headers lazily).
-func (c *Client) open(cc *http2.ClientConn, raw net.Conn) (*streamConn, error) {
+func (c *Client) open(cc *http2.ClientConn, raw net.Conn, src string) (*streamConn, error) {
 	authority := c.authority
 	if authority == "" {
 		authority = raw.RemoteAddr().String()
@@ -393,7 +393,7 @@ func (c *Client) open(cc *http2.ClientConn, raw net.Conn) (*streamConn, error) {
 		"User-Agent":   {c.ua},
 	}
 	s := &streamConn{
-		raw: raw, cancel: cancel,
+		raw: raw, cancel: cancel, src: src,
 		done: make(chan struct{}), cut: make(chan struct{}), wend: make(chan struct{}),
 		rch: make(chan []byte), wch: make(chan []byte),
 		rdl: newDeadline(), wdl: newDeadline(),
@@ -454,12 +454,17 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 //
 // A stream is slow when, over a slowWindow, data was waiting for the reader
 // at least half the time and the reader took less than slowFloor bytes per
-// second. At most maxSlow streams may be slow at once (about 9 MiB: a
-// window plus a readStep piece or two each). When one more turns slow, the one that has been slow the
-// longest is ended: a device holding many slow streams loses its own first,
-// and cannot keep the slots against others. Readers above the floor are
-// not limited; what they can pin is bounded by the bandwidth they really
-// use (about one second of it).
+// second. Windows follow one another for as long as data arrives; a reader
+// that catches up now and then is still judged on the whole window, so
+// stalling and then taking a few pieces in a burst does not escape.
+//
+// At most maxSlow streams may be slow at once (about 9 MiB: a window plus a
+// readStep piece or two each). When one more turns slow, a stream is ended:
+// the one slow for the longest among those of the source (LAN device, see
+// transport.WithSource) that has the most slow streams. A device holding
+// many slow streams loses its own, and cannot have another device's paused
+// download cut. Readers above the floor are not limited; what they can pin
+// is bounded by the bandwidth they really use (about one second of it).
 const slowFloor = streamWindow // bytes per second
 
 // Atomics so tests can lower them.
@@ -480,10 +485,20 @@ var errStalled = errors.New("grpc: stream ended: its reader is too slow and too 
 
 // backlog is readLoop's record of how its reader keeps up.
 type backlog struct {
-	start  time.Time     // start of the current window; zero when the reader is not behind
+	start  time.Time     // start of the current window; zero before the first data
 	waited time.Duration // time in the window with data waiting for the reader
 	taken  int           // bytes the reader took in the window
 	timer  *time.Timer
+}
+
+// judge closes the window if it is over and starts the next one.
+func (b *backlog) judge(s *streamConn, now time.Time) {
+	elapsed := now.Sub(b.start)
+	if elapsed < time.Duration(slowWindow.Load()) {
+		return
+	}
+	s.setSlow(b.waited*2 >= elapsed && int64(b.taken)*int64(time.Second) < slowFloor*int64(elapsed))
+	b.start, b.waited, b.taken = now, 0, 0
 }
 
 // deliver hands data to Read and keeps the slow-reader account.
@@ -493,30 +508,24 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 		return errStalled
 	default:
 	}
+	now := time.Now()
+	s.last.Store(now.UnixNano())
+	if b.start.IsZero() {
+		b.start = now
+	}
+	b.judge(s, now)
 	select {
-	case s.rch <- data: // the reader was waiting: it has caught up
-		if !b.start.IsZero() {
-			b.start = time.Time{}
-			s.setSlow(false)
-		}
+	case s.rch <- data: // the reader was waiting
+		b.taken += len(data)
 		return nil
 	case <-s.done:
 		return net.ErrClosed
 	default:
 	}
-	period := time.Duration(slowWindow.Load())
-	now := time.Now()
-	if b.start.IsZero() {
-		b.start, b.waited, b.taken = now, 0, 0
-	}
+	s.blocked.Store(true)
+	defer s.blocked.Store(false)
 	for {
-		left := period - now.Sub(b.start)
-		if left <= 0 {
-			elapsed := now.Sub(b.start)
-			s.setSlow(b.waited*2 >= elapsed && int64(b.taken)*int64(time.Second) < slowFloor*int64(elapsed))
-			b.start, b.waited, b.taken = now, 0, 0
-			left = period
-		}
+		left := max(time.Duration(slowWindow.Load())-now.Sub(b.start), time.Millisecond)
 		if b.timer == nil {
 			b.timer = time.NewTimer(left)
 		} else {
@@ -525,7 +534,9 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 		select {
 		case s.rch <- data:
 			b.timer.Stop()
-			b.waited += time.Since(now)
+			t := time.Now()
+			s.last.Store(t.UnixNano())
+			b.waited += t.Sub(now)
 			b.taken += len(data)
 			return nil
 		case <-s.done:
@@ -538,12 +549,13 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 			t := time.Now()
 			b.waited += t.Sub(now)
 			now = t
+			b.judge(s, now)
 		}
 	}
 }
 
 // setSlow adds s to or removes it from the slow streams. Adding one over
-// maxSlow ends the stream that has been slow the longest.
+// maxSlow ends a stream (see "Slow readers" above).
 func (s *streamConn) setSlow(slow bool) {
 	slowMu.Lock()
 	if slow == s.slow || s.ended {
@@ -555,9 +567,28 @@ func (s *streamConn) setSlow(slow bool) {
 	if slow {
 		slowList = append(slowList, s)
 		if len(slowList) > int(maxSlow.Load()) {
-			victim = slowList[0]
+			// A stream that has been waiting for the server, not for its
+			// reader, for a whole window has nothing buffered: it was slow
+			// and is now idle. It is judged again when data arrives.
+			idle := time.Now().UnixNano() - slowWindow.Load()
+			slowList = slices.DeleteFunc(slowList, func(o *streamConn) bool {
+				if o == s || o.blocked.Load() || o.last.Load() > idle {
+					return false
+				}
+				o.slow = false
+				return true
+			})
+		}
+		if len(slowList) > int(maxSlow.Load()) {
+			count, most := map[string]int{}, 0
+			for _, o := range slowList {
+				count[o.src]++
+				most = max(most, count[o.src])
+			}
+			i := slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most })
+			victim = slowList[i]
 			victim.slow, victim.ended = false, true
-			slowList = slices.Delete(slowList, 0, 1)
+			slowList = slices.Delete(slowList, i, i+1)
 		}
 	} else if i := slices.Index(slowList, s); i >= 0 {
 		slowList = slices.Delete(slowList, i, i+1)
@@ -627,9 +658,14 @@ type streamConn struct {
 	done    chan struct{} // closed by Close
 	once    sync.Once
 
-	cut   chan struct{} // closed when the stream is ended as a slow reader
-	slow  bool          // in slowList; guarded by slowMu
-	ended bool          // cut closed; guarded by slowMu
+	cut  chan struct{} // closed when the stream is ended as a slow reader
+	slow bool          // in slowList; guarded by slowMu
+	src  string        // whose stream this is, for the slow-reader cap
+	// For setSlow, about another stream: readLoop is in deliver waiting
+	// for the reader, and when (unix nanoseconds) deliver last ran.
+	blocked atomic.Bool
+	last    atomic.Int64
+	ended   bool // cut closed; guarded by slowMu
 
 	rch     chan []byte // from readLoop; closed on end of stream
 	rerr    error       // set by readLoop before closing rch
@@ -890,9 +926,12 @@ func readHunks(r *bufio.Reader, emit func([]byte) error) error {
 			}
 			for n := int(l); n > 0; {
 				if piece == nil {
-					// Never more than what the message can still hold: a
-					// header alone must not make us allocate.
-					piece = make([]byte, 0, min(left, readStep))
+					// Never more than what the message can still hold, and
+					// little before the bytes are here: a header that only
+					// declares a large entry must not make us allocate it.
+					piece = make([]byte, 0, min(left, readStart))
+				} else if len(piece) == cap(piece) {
+					piece = slices.Grow(piece, min(left, readStep-len(piece), len(piece)))[:len(piece)]
 				}
 				k := min(n, cap(piece)-len(piece))
 				if _, err := io.ReadFull(r, piece[len(piece):len(piece)+k]); err != nil {
@@ -900,7 +939,7 @@ func readHunks(r *bufio.Reader, emit func([]byte) error) error {
 				}
 				piece = piece[:len(piece)+k]
 				n, left = n-k, left-k
-				if len(piece) == cap(piece) {
+				if len(piece) >= min(readStep, len(piece)+left) {
 					if err := emit(piece); err != nil {
 						return err
 					}
@@ -920,6 +959,9 @@ func readHunks(r *bufio.Reader, emit func([]byte) error) error {
 	return nil
 }
 
-// readStep is the largest piece of a message handed to the reader, and so
-// what is allocated at a time.
-const readStep = 32 << 10
+// readStep is the largest piece of a message handed to the reader. A piece
+// starts at readStart and doubles as its bytes arrive.
+const (
+	readStep  = 32 << 10
+	readStart = 4 << 10
+)

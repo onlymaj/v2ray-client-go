@@ -200,3 +200,36 @@ func TestUncheckedGroupWithDisabledMemberBlocks(t *testing.T) {
 		t.Fatalf("a checked and down: %+v, want direct", got)
 	}
 }
+
+// Round 15: a member that had been reported down while disabled stayed
+// "checked" when the admin enabled it, so the group went direct until its
+// first real health result.
+func TestJustEnabledMemberBlocksUntilChecked(t *testing.T) {
+	mk := func(cEnabled bool) *config.Config {
+		cfg := testConfig()
+		cfg.Settings.KillSwitch = config.KillSwitchDirect
+		cfg.Groups[0].Members = []string{"a", "c"}
+		cfg.Clients[2].Enabled = cEnabled
+		return cfg
+	}
+	d, err := New(mk(false), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	d.HealthUpdate("a", false, 0)
+	d.HealthUpdate("c", false, 0) // a late result for the disabled client
+	if got := d.Route(lan, "", other); got.Kind != KindDirect || !got.KillSwitch {
+		t.Fatalf("a down, c disabled: %+v, want direct", got)
+	}
+	if err := d.Update(mk(true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Route(lan, "", other); got.Kind != KindBlock || !got.KillSwitch {
+		t.Fatalf("c just enabled, not checked yet: %+v, want a block", got)
+	}
+	d.HealthUpdate("c", false, 0)
+	if got := d.Route(lan, "", other); got.Kind != KindDirect || !got.KillSwitch {
+		t.Fatalf("c checked and down: %+v, want direct", got)
+	}
+}

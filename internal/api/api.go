@@ -356,6 +356,9 @@ func fetchClient(origHost string) *http.Client {
 	)
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.Proxy = nil
+	// The default is 10 MB of response headers, per hop; the body is
+	// capped separately.
+	tr.MaxResponseHeaderBytes = 64 << 10
 	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {

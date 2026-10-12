@@ -18,6 +18,7 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/group"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
+	"github.com/onlymaj/v2ray-client-go/internal/transport"
 )
 
 // Decision kinds.
@@ -134,13 +135,26 @@ func (d *Dispatcher) update(cfg *config.Config) error {
 		}
 		ns.clients[cc.ID] = &clientEntry{cfg: cc, allowPrivate: opts.AllowPrivate, c: c}
 	}
+	// A result from before a client was disabled or removed says nothing
+	// about it when it comes back: forget it, so the client counts as not
+	// checked yet (and a group waits for its check instead of going direct,
+	// round 15) rather than as down.
+	for id := range d.health {
+		if !ns.usable(id) {
+			delete(d.health, id)
+		}
+	}
 	for _, g := range cfg.Groups {
 		if oe := old.groups[g.ID]; oe != nil && oe.sel != nil && reflect.DeepEqual(oe.g, g) {
 			ns.groups[g.ID] = oe
-			// Members whose availability changed get their new health.
+			// Members whose availability changed: down when no longer
+			// usable, not checked yet when usable again.
 			for _, id := range g.Members {
-				if old.usable(id) != ns.usable(id) {
+				switch was, is := old.usable(id), ns.usable(id); {
+				case was && !is:
 					d.feed(ns, oe.sel, id)
+				case !was && is:
+					oe.sel.Forget(id)
 				}
 			}
 			continue
@@ -341,7 +355,7 @@ func (d *Dispatcher) Dial(ctx context.Context, src netip.Addr, domain string, ds
 		domain = dst.Domain
 	}
 	dec := d.Route(src, domain, dst.IP)
-	c, err := d.dial(ctx, dec, domain, dst)
+	c, err := d.dial(transport.WithSource(ctx, src.String()), dec, domain, dst)
 	return c, dec, err
 }
 
@@ -351,7 +365,7 @@ func (d *Dispatcher) Dial(ctx context.Context, src netip.Addr, domain string, ds
 // <qname>:53 (which would let any website answer DNS for the whole LAN).
 func (d *Dispatcher) DialRouted(ctx context.Context, src netip.Addr, routeDomain string, dst outbound.Addr) (net.Conn, Decision, error) {
 	dec := d.Route(src, routeDomain, dst.IP)
-	c, err := d.dial(ctx, dec, "", dst)
+	c, err := d.dial(transport.WithSource(ctx, src.String()), dec, "", dst)
 	return c, dec, err
 }
 

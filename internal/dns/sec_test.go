@@ -507,6 +507,10 @@ func TestCacheVariant(t *testing.T) {
 	}
 	cd := append([]byte(nil), plain...)
 	cd[3] |= flagCD
+	noRD := append([]byte(nil), plain...)
+	noRD[2] &^= flagRD >> 8
+	status := append([]byte(nil), plain...)
+	status[2] |= 2 << 3 // opcode STATUS
 	for _, tc := range []struct {
 		name    string
 		q       []byte
@@ -522,6 +526,9 @@ func TestCacheVariant(t *testing.T) {
 		{"ecs after padding", withOpt(0, []byte{0, 12, 0, 2, 0, 0, 0, 8, 0, 4, 0, 1, 0, 0}), "", false},
 		{"bad option length", withOpt(0, []byte{0, 10, 0, 9, 1}), "", false},
 		{"cd", cd, "", false},
+		{"private-use option", withOpt(0, []byte{0xfd, 0xe9, 0, 2, 1, 2}), "", false}, // round 15
+		{"no rd", noRD, "", false},
+		{"not a query", status, "", false},
 	} {
 		h, q, err := parseQuestion(tc.q)
 		if err != nil {

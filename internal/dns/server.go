@@ -108,6 +108,10 @@ type Server struct {
 	upstream outbound.Addr
 	upErr    error
 	idle     map[string]idleConn
+	// gen counts SetUpstream and Flush calls. A query that was in flight
+	// across one neither pools its connection nor caches its answer: both
+	// may belong to the configuration before the change.
+	gen uint64
 }
 
 type idleConn struct {
@@ -183,6 +187,7 @@ func (s *Server) SetUpstream(addr string) {
 	a, err := parseUpstream(addr)
 	s.mu.Lock()
 	s.upstream, s.upErr = a, err
+	s.gen++
 	s.mu.Unlock()
 	s.closeIdle()
 	if err != nil {
@@ -222,7 +227,18 @@ func parseUpstream(addr string) (outbound.Addr, error) {
 }
 
 // Flush empties the response cache.
-func (s *Server) Flush() { s.cache.flush() }
+func (s *Server) Flush() {
+	s.mu.Lock()
+	s.gen++
+	s.cache.flush()
+	s.mu.Unlock()
+}
+
+func (s *Server) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
 
 // ListenAndServe serves DNS on addr over both UDP and TCP until ctx is
 // cancelled. It returns once both listeners are closed; the error is the
@@ -412,6 +428,7 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 		return errorResponse(query, rcodeServFail) // not logged: a flood would fill the log
 	}
 	defer s.queries.release(src)
+	gen := s.generation()
 	resp, cacheable, err := s.exchange(ctx, src, query, q, up, upErr, key)
 	if err != nil {
 		if ok, dropped := s.failLog.allow(time.Now()); ok {
@@ -423,7 +440,11 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 		return errorResponse(query, rcodeServFail)
 	}
 	if cacheable && shared {
-		s.cache.put(q, key+variant, resp)
+		s.mu.Lock()
+		if gen == s.gen {
+			s.cache.put(q, key+variant, resp)
+		}
+		s.mu.Unlock()
 	}
 	return resp
 }
@@ -481,12 +502,13 @@ func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q q
 	if upErr != nil {
 		return nil, false, upErr
 	}
+	gen := s.generation()
 
 	// A pooled connection may have been closed by the upstream; retry
 	// once on a fresh one.
 	if ic, ok := s.takeIdle(key); ok {
 		if resp, err := exchangeOn(ctx, ic.conn, query); err == nil {
-			s.putIdle(key, ic.conn, ic.born)
+			s.putIdle(key, ic.conn, ic.born, gen)
 			return resp, true, nil
 		}
 		ic.conn.Close()
@@ -506,7 +528,7 @@ func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q q
 		c.Close()
 		return resp, false, nil
 	}
-	s.putIdle(key, c, time.Now())
+	s.putIdle(key, c, time.Now(), gen)
 	return resp, true, nil
 }
 
@@ -589,12 +611,17 @@ func (s *Server) takeIdle(key string) (idleConn, bool) {
 // putIdle pools c under key. born is when c was dialed: a pooled
 // connection is retired maxPooledAge after it was opened however often it
 // is reused, so a route or server change is picked up within that time.
-func (s *Server) putIdle(key string, c net.Conn, born time.Time) {
+func (s *Server) putIdle(key string, c net.Conn, born time.Time, gen uint64) {
 	if key == "" {
 		c.Close()
 		return
 	}
 	s.mu.Lock()
+	if gen != s.gen {
+		s.mu.Unlock()
+		c.Close()
+		return
+	}
 	old, had := s.idle[key]
 	s.idle[key] = idleConn{conn: c, since: time.Now(), born: born}
 	s.mu.Unlock()

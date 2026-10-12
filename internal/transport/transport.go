@@ -45,3 +45,18 @@ func Lookup(name string) (Factory, error) {
 	}
 	return f, nil
 }
+
+type sourceKey struct{}
+
+// WithSource names whose traffic a dial is for (the LAN device's address).
+// A layer that shares limits between tunnels can use it to make a device
+// pay for its own excess rather than another's.
+func WithSource(ctx context.Context, src string) context.Context {
+	return context.WithValue(ctx, sourceKey{}, src)
+}
+
+// Source returns the name given to WithSource, or "".
+func Source(ctx context.Context) string {
+	src, _ := ctx.Value(sourceKey{}).(string)
+	return src
+}
