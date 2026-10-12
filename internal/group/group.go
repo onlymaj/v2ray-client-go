@@ -61,8 +61,9 @@ type member struct {
 	seed     uint64 // fnv of id, for rendezvous hashing
 	up       bool
 	delay    time.Duration
-	upStreak int // consecutive up reports (failover)
-	better   int // consecutive "better than current" reports (least-ping)
+	seen     bool // has reported at least once
+	upStreak int  // consecutive up reports (failover)
+	better   int  // consecutive "better than current" reports (least-ping)
 }
 
 // Selector is safe for concurrent use.
@@ -112,7 +113,7 @@ func (s *Selector) Update(id string, up bool, delay time.Duration) {
 		return
 	}
 	m := &s.members[i]
-	m.up, m.delay = up, delay
+	m.up, m.delay, m.seen = up, delay, true
 	if up {
 		m.upStreak++
 	} else {
@@ -256,6 +257,19 @@ func (s *Selector) pick(src netip.Addr, dst string, advance bool) (string, bool)
 
 // Current returns the active member of a failover or least-ping group ("" if
 // none is up). For round-robin and sticky it returns "".
+// Unknown reports whether no member has reported its health yet (right
+// after start, or a group of clients that were just added).
+func (s *Selector) Unknown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.members {
+		if s.members[i].seen {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Selector) Current() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

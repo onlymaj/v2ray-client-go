@@ -111,6 +111,8 @@ add name=v2ray key=ROS_USER value="v2ray"
 add name=v2ray key=ROS_PASS value="another-long-random"
 ```
 
+Replace both passwords before you paste this. The app refuses to start with `change-me-long-random` as `ADMIN_PASSWORD`, and logs a warning for one shorter than 10 characters. Failed logins are written to the container log with the source address.
+
 | Variable | Required | Meaning |
 |---|---|---|
 | `ADMIN_PASSWORD` | yes | Web UI / API login. The app refuses to start without it. |
@@ -383,7 +385,7 @@ What should happen to proxied traffic when no proxy works? The app and the route
 **Inside the app** (`settings.killSwitch`, for when the container runs but every client in the selected group is down):
 
 - `block` (default): the connection is refused, so proxied TCP does not leak. This covers only what the router sends to the container: UDP (section 7) and IPv6 (unless you followed "IPv6 (required)") never reach it.
-- `direct`: the connection goes out directly from the container.
+- `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. In the first seconds after a start, before any client of a group has been checked, the connection is refused instead, so a restart does not send traffic out directly while the proxies are fine.
 
 **On the router** (for when the container itself is down or stopped):
 

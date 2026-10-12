@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/onlymaj/v2ray-client-go/internal/config"
 	"github.com/onlymaj/v2ray-client-go/internal/netguard"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
@@ -145,5 +146,31 @@ func TestWatchUsesMonotonicClock(t *testing.T) {
 	w.touch()
 	if got := w.last.Load(); got > int64(24*time.Hour) {
 		t.Fatalf("touch stored %d: wall-clock time", got)
+	}
+}
+
+// Round 13: a group whose members had not been checked yet counted as down.
+// With the kill switch in direct mode, every start sent group-routed traffic
+// and DNS out in the clear for the first seconds, although the proxies were
+// fine. Until the first health result the group blocks instead.
+func TestKillSwitchDirectBlocksBeforeFirstCheck(t *testing.T) {
+	cfg := testConfig()
+	cfg.Settings.KillSwitch = config.KillSwitchDirect
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if got := d.Route(lan, "", other); got.Kind != KindBlock || !got.KillSwitch {
+		t.Fatalf("before any health result: %+v, want a block", got)
+	}
+	d.HealthUpdate("a", false, 0)
+	d.HealthUpdate("b", false, 0)
+	if got := d.Route(lan, "", other); got.Kind != KindDirect || !got.KillSwitch {
+		t.Fatalf("all members checked and down: %+v, want direct", got)
+	}
+	d.HealthUpdate("b", true, time.Millisecond)
+	if got := d.Route(lan, "", other); got.Kind != KindClient || got.ClientID != "b" {
+		t.Fatalf("member up: %+v", got)
 	}
 }

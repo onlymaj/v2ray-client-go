@@ -40,7 +40,7 @@ The mock accepts the password `admin`.
   "tls": "reality",             // "none" | "tls" | "reality" (reality is vless only)
   "sni": "www.microsoft.com",
   "fingerprint": "chrome",      // "chrome" | "firefox" | "safari" | "random"
-  "alpn": ["h2", "http/1.1"],   // tls only
+  "alpn": ["h2", "http/1.1"],   // tls only; ignored for ws (always http/1.1); grpc always includes h2
   "allowInsecure": false,       // tls only; never taken from share links or subscriptions
   "publicKey": "...",           // reality: required
   "shortId": "6f42d83d",        // reality: hex, 0-16 chars
@@ -135,7 +135,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
   "ports": { "transparent": 12345, "socks": 1080, "http": 8118, "dns": 5353, "ui": 8080 },  // 1-65535; socks/http/dns accept 0 = disabled
   "healthUrl": "https://www.gstatic.com/generate_204",
   "healthInterval": 30,          // seconds, 5-3600
-  "killSwitch": "block",         // "block" | "direct"
+  "killSwitch": "block",         // "block" | "direct" (a group no member of which has been checked yet always blocks)
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client
   "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",

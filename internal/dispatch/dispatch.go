@@ -302,6 +302,14 @@ func (d *Dispatcher) route(src netip.Addr, domain string, dst netip.Addr, advanc
 			pick = g.sel.Pick
 		}
 		id, ok := pick(src, key)
+		if !ok && g.sel.Unknown() {
+			// No member has been checked yet (the first seconds after a
+			// start). That is not "all down": the kill switch in direct
+			// mode would send traffic and DNS out in the clear although
+			// the proxies may be fine. Block until the first result.
+			dec.KillSwitch, dec.Kind = true, KindBlock
+			return dec
+		}
 		if !ok || !st.usable(id) {
 			return st.kill(dec)
 		}

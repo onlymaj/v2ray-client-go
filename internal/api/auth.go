@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -71,9 +72,58 @@ type rateEntry struct {
 	inflight bool // a login from this IP is being checked
 }
 
+// docPassword is the placeholder in docs/routeros.md. Its commands are made
+// to be pasted, and the repository is public.
+const docPassword = "change-me-long-random"
+
+// minPassword is the length below which a start-up warning is logged. The
+// limiter allows about 43,000 guesses a day from several addresses.
+const minPassword = 10
+
+// logf is a var so tests can capture it.
+var logf = log.Printf
+
+// loginLog limits the log lines for failed and refused logins: a flood of
+// guesses must show in the container log without filling it.
+var loginLog struct {
+	sync.Mutex
+	start   time.Time
+	n, more int
+}
+
+const (
+	loginLogBurst  = 5
+	loginLogWindow = time.Minute
+)
+
+func logLogin(what, ip string) {
+	l := &loginLog
+	l.Lock()
+	defer l.Unlock()
+	now := time.Now()
+	if now.Sub(l.start) >= loginLogWindow {
+		if l.more > 0 {
+			logf("api: %d more failed or refused logins not logged", l.more)
+		}
+		l.start, l.n, l.more = now, 0, 0
+	}
+	if l.n >= loginLogBurst {
+		l.more++
+		return
+	}
+	l.n++
+	logf("api: %s from %s", what, ip)
+}
+
 func newAuth(password string) (*auth, error) {
 	if password == "" {
 		return nil, errors.New("api: ADMIN_PASSWORD is empty")
+	}
+	if password == docPassword {
+		return nil, errors.New("api: ADMIN_PASSWORD is the example value from the documentation; set your own")
+	}
+	if len(password) < minPassword {
+		logf("api: warning: ADMIN_PASSWORD is shorter than %d characters; anyone who can reach the UI can guess it in time", minPassword)
 	}
 	a := &auth{
 		salt:     make([]byte, 16),
@@ -269,6 +319,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 	if ok, wait := s.auth.begin(ip); !ok {
+		logLogin("login refused by the rate limit", ip)
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds()+0.999)))
 		writeErr(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
@@ -276,6 +327,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	ok := s.auth.check(body.Password)
 	s.auth.done(ip, ok)
 	if !ok {
+		logLogin("failed login", ip) // never the submitted password
 		writeErr(w, http.StatusUnauthorized, "wrong password")
 		return
 	}

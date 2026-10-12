@@ -215,3 +215,81 @@ func TestDecodeHunksNoPerEntryMemory(t *testing.T) {
 		t.Fatalf("got %d bytes, want %d inside the message buffer", len(got), maxMessage/3)
 	}
 }
+
+// Round 13: every stalled stream holds a receive window, and the conn caps
+// allow 512 of them: 128 MiB against a 32 MiB heap limit, from four LAN
+// addresses that start downloads and stop reading. Only maxStalled streams
+// may be stalled at once; one that stalls beyond that is ended.
+func TestStalledStreamsCapped(t *testing.T) {
+	const after = 50 * time.Millisecond
+	oldAfter, oldMax := stallAfter.Swap(int64(after)), maxStalled.Swap(2)
+	defer func() { stallAfter.Store(oldAfter); maxStalled.Store(oldMax) }()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	h2 := &http2.Server{}
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		h2.ServeConn(c, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/grpc")
+			w.WriteHeader(http.StatusOK)
+			msg := encodeHunk(make([]byte, 16<<10))
+			for {
+				if _, err := w.Write(msg); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+			}
+		})})
+	}()
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	var conns []net.Conn
+	for range 3 {
+		c, err := l.(*Client).DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+			return net.Dial("tcp", ln.Addr().String())
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		if _, err := c.Read(make([]byte, 1)); err != nil { // start the call, then stop reading
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+	}
+	time.Sleep(10 * after)
+	if n := stalled.Load(); n != 2 {
+		t.Fatalf("%d streams counted as stalled, want 2", n)
+	}
+	ended := 0
+	buf := make([]byte, 16<<10)
+	for _, c := range conns {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		for range 8 { // a stream that was cut returns what it had, then the error
+			if _, err := c.Read(buf); err != nil {
+				if !errors.Is(err, errStalled) {
+					t.Fatalf("stream ended with %v", err)
+				}
+				ended++
+				break
+			}
+		}
+	}
+	if ended != 1 {
+		t.Fatalf("%d streams ended, want only the one that stalled over the cap", ended)
+	}
+	for _, c := range conns {
+		c.Close()
+	}
+	for i := 0; stalled.Load() != 0 && i < 100; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := stalled.Load(); n != 0 {
+		t.Fatalf("stalled count is %d after all streams closed", n)
+	}
+}

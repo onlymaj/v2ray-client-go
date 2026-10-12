@@ -321,7 +321,8 @@ func (s *Server) serveTCP(ctx context.Context, ln net.Listener) error {
 			// Out of file descriptors is temporary; returning would end the
 			// whole process (same handling as inbound.serve).
 			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() || errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+			if errors.As(err, &ne) && ne.Timeout() || errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+				errors.Is(err, syscall.ENOBUFS) || errors.Is(err, syscall.ENOMEM) {
 				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
 				time.Sleep(delay)
 				continue

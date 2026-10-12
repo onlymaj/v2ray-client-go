@@ -328,6 +328,12 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 		s.rerr = err
 		return
 	}
+	var stallTimer *time.Timer
+	defer func() {
+		if stallTimer != nil {
+			stallTimer.Stop()
+		}
+	}()
 	for {
 		msg, err := readMessage(resp.Body)
 		if err == io.EOF {
@@ -346,12 +352,67 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 		if len(data) == 0 {
 			continue
 		}
-		select {
-		case s.rch <- data:
-		case <-s.done:
-			s.rerr = net.ErrClosed
+		if err := s.deliver(data, &stallTimer); err != nil {
+			s.rerr = err
 			return
 		}
+	}
+}
+
+// A stream whose reader has not taken a message for stallAfter is stalled:
+// it holds a full receive window (streamWindow) plus the message in hand.
+// The cap on open conns allows 512 of them, 128 MiB against a 32 MiB heap
+// limit, and the relay's idle timer does not help (a trickle in the other
+// direction resets it). So only maxStalled streams may be stalled at once,
+// about 8 MiB; a stream that stalls beyond that is ended. Atomics so tests
+// can lower them.
+var (
+	stallAfter atomic.Int64 // a time.Duration
+	maxStalled atomic.Int32
+	stalled    atomic.Int32
+)
+
+func init() {
+	stallAfter.Store(int64(5 * time.Second))
+	maxStalled.Store(32)
+}
+
+var errStalled = errors.New("grpc: reader stalled and too many streams are stalled")
+
+// deliver hands data to Read. timer is the caller's, reused across calls.
+func (s *streamConn) deliver(data []byte, timer **time.Timer) error {
+	select {
+	case s.rch <- data:
+		return nil
+	case <-s.done:
+		return net.ErrClosed
+	default:
+	}
+	after := time.Duration(stallAfter.Load())
+	if *timer == nil {
+		*timer = time.NewTimer(after)
+	} else {
+		(*timer).Reset(after)
+	}
+	select {
+	case s.rch <- data:
+		(*timer).Stop()
+		return nil
+	case <-s.done:
+		(*timer).Stop()
+		return net.ErrClosed
+	case <-(*timer).C:
+	}
+	if stalled.Add(1) > maxStalled.Load() {
+		stalled.Add(-1)
+		return errStalled
+	}
+	defer stalled.Add(-1)
+	select {
+	case s.rch <- data:
+		return nil
+	case <-s.done:
+		return net.ErrClosed
 	}
 }
 

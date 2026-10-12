@@ -568,3 +568,36 @@ func TestRuleWithoutValuesRefused(t *testing.T) {
 	e.expect("PUT", "/api/rules", []router.Rule{
 		{Type: "dest", Values: []string{"203.0.113.0/24"}, Target: router.Target{Kind: "block"}}, def}, 200, nil)
 }
+
+// Round 13: the example password from docs/routeros.md was accepted, and
+// password guessing left no line in the log. The example is refused at
+// start, and failed logins are logged with the source, a few per minute.
+func TestExamplePasswordRefusedAndFailedLoginsLogged(t *testing.T) {
+	if _, err := newAuth(docPassword); err == nil {
+		t.Fatal("the documentation's example password was accepted")
+	}
+	e := newEnv(t)
+	var mu sync.Mutex
+	var lines []string
+	old := logf
+	logf = func(f string, a ...any) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+	defer func() { logf = old }()
+	loginLog.Lock()
+	loginLog.start, loginLog.n, loginLog.more = time.Time{}, 0, 0
+	loginLog.Unlock()
+
+	e.expect("POST", "/api/login", map[string]string{"password": "guess-one"}, 401, nil)
+	for range 20 {
+		logLogin("failed login", "192.0.2.9")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != loginLogBurst || !strings.Contains(lines[0], "failed login from 127.0.0.1") {
+		t.Fatalf("log lines: %q", lines)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "guess-one") {
+			t.Fatal("the submitted password was logged")
+		}
+	}
+}

@@ -72,7 +72,8 @@ func TestRelayCutWhenProxyRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	dec, cut := register(t, d, "any.test", other) // default rule -> group g1, nobody up yet
+	d.HealthUpdate("a", false, 0)                 // checked and down (unchecked would block, round 13)
+	dec, cut := register(t, d, "any.test", other) // default rule -> group g1, nobody up
 	if dec.Kind != KindDirect || !dec.KillSwitch {
 		t.Fatalf("setup decision %+v", dec)
 	}
