@@ -527,7 +527,29 @@ func TestRefreshKeepsClientARuleUses(t *testing.T) {
 	if cfg.Client(two) != nil {
 		t.Fatal("a client no rule uses was kept")
 	}
-	if sub.Count != 2 || !strings.Contains(sub.LastError, "kept because rules use them") {
+	if sub.Count != 2 || sub.LastError != "" || !strings.Contains(sub.Note, "kept because rules use them") {
 		t.Fatalf("subscription does not report the kept client: %+v", sub)
+	}
+}
+
+// Round 11: the check for more than share.MaxLinks links looked only at the
+// last parse error. Round 10 added errors for unusable links after it, so one
+// such link got an oversized list accepted and cut to the first links.
+func TestTooManyLinksWithUnusableLink(t *testing.T) {
+	e := newEnv(t)
+	e.check = func(c config.Client) error {
+		if c.Fingerprint == "ios" {
+			return errors.New("tls: unknown fingerprint ios")
+		}
+		return nil
+	}
+	e.login()
+	lines := []string{"vless://" + u1 + "@bad.example:443?security=tls&fp=ios#bad"}
+	for i := range share.MaxLinks + 5 {
+		lines = append(lines, link(t, "n", fmt.Sprintf("h%d.example", i), 443, u2))
+	}
+	e.expect("POST", "/api/import", map[string]string{"text": strings.Join(lines, "\n")}, 400, nil)
+	if n := len(e.store.Get().Clients); n != 0 {
+		t.Fatalf("%d clients saved from an oversized list", n)
 	}
 }

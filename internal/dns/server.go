@@ -390,12 +390,14 @@ func srcOf(a net.Addr) netip.Addr {
 // handle answers one query. It returns nil only for input it cannot even
 // reply to.
 func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byte {
+	// A response is never answered, malformed or not: the FORMERR reply to
+	// one is itself such a packet, so two servers could bounce it for ever.
+	if h, err := parseHeader(query); err != nil || h.Flags&flagQR != 0 {
+		return nil
+	}
 	h, q, err := parseQuestion(query)
 	if err != nil {
 		return errorResponse(query, rcodeFormErr)
-	}
-	if h.Flags&flagQR != 0 {
-		return nil // a response, not a query
 	}
 	up, upErr := s.upstreamAddr()
 	key := s.routeKey(src, q.Name, up)
@@ -703,7 +705,9 @@ func (p *perSource) overShare(ip netip.Addr, total int) bool {
 	k := sourceKey(ip)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return len(p.n) > 0 && p.n[k] > total/len(p.n)
+	// At least 1: with more sources than slots, a source with a single
+	// query must still be able to queue.
+	return len(p.n) > 0 && p.n[k] > max(1, total/len(p.n))
 }
 
 func (p *perSource) release(ip netip.Addr) {

@@ -40,7 +40,7 @@ export function Import() {
     try {
       const u = await api(`/subscriptions/${s.id}/refresh`, { method: 'POST' });
       setSubs((xs) => xs.map((x) => (x.id === s.id ? u : x)));
-      toast(u.lastError ? `Refresh failed: ${u.lastError}` : `${u.name}: ${u.count} clients`, u.lastError ? 'err' : 'ok');
+      toast(u.lastError ? `Refresh failed: ${u.lastError}` : `${u.name}: ${u.count} clients${u.note ? `. ${u.note}` : ''}`, u.lastError ? 'err' : 'ok');
     } catch (err) {
       toast(err.message, 'err');
     }
@@ -87,9 +87,9 @@ export function Import() {
                 ))}
               </div>
             )}
-            {result.errors.map((e) => (
-              <Alert key={e.line} variant="destructive">
-                Line {e.line}: {e.error}
+            {result.errors.map((e, i) => (
+              <Alert key={i} variant="destructive">
+                {e.line ? `Line ${e.line}: ` : ''}{e.error}
                 <div className="truncate font-mono text-xs opacity-80">{e.text}</div>
               </Alert>
             ))}
@@ -111,6 +111,7 @@ export function Import() {
                   <div className="truncate font-mono text-xs text-muted-foreground">{s.url}</div>
                   <div className="text-xs text-muted-foreground">Updated {fmtAgo(s.lastUpdate)}</div>
                   {s.lastError && <div className="text-xs text-destructive">{s.lastError}</div>}
+                  {s.note && <div className="text-xs text-muted-foreground">{s.note}</div>}
                 </div>
                 <div className="flex gap-1">
                   <Button variant="outline" size="sm" onClick={() => refresh(s)} disabled={refreshing[s.id]}>

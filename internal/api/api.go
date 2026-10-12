@@ -237,8 +237,11 @@ func (s *server) hostAllowed(host string) bool {
 // tooManyLinks reports whether share.ParseBulk stopped at share.MaxLinks;
 // the API refuses such input rather than taking the first MaxLinks links.
 func tooManyLinks(res share.Result) error {
-	if n := len(res.Errors); n > 0 && strings.HasPrefix(res.Errors[n-1].Err, "too many links") {
-		return errors.New(res.Errors[n-1].Err)
+	// Not only the last error: usable appends its own after ParseBulk's.
+	for _, e := range res.Errors {
+		if strings.HasPrefix(e.Err, "too many links") {
+			return errors.New(e.Err)
+		}
 	}
 	return nil
 }

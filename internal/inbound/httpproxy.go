@@ -66,7 +66,9 @@ func httpConnect(c net.Conn) (net.Conn, outbound.Addr, error) {
 	}
 	host, port, err := net.SplitHostPort(req.Host)
 	p, perr := strconv.ParseUint(port, 10, 16)
-	if err != nil || perr != nil || host == "" || p == 0 {
+	// 253: the longest DNS name. Every other name source is bounded (SOCKS
+	// 255, sniffed names 253); rule matching costs grow with the length.
+	if err != nil || perr != nil || host == "" || len(host) > 253 || p == 0 {
 		c.Write([]byte("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
 		return nil, outbound.Addr{}, errors.New("http: bad CONNECT target")
 	}

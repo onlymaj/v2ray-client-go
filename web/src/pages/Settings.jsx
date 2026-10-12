@@ -8,10 +8,10 @@ import { Input } from '../components/ui/input';
 import { Switch } from '../components/ui/switch';
 
 const PORTS = [
-  ['transparent', 'Transparent proxy', 'Port that LAN traffic is redirected to', 1],
-  ['socks', 'SOCKS5', '0 disables', 0],
-  ['http', 'HTTP proxy', '0 disables', 0],
-  ['dns', 'DNS', '0 disables', 0],
+  ['transparent', 'Transparent proxy', 'Port that LAN traffic is redirected to. Takes effect after restart', 1],
+  ['socks', 'SOCKS5', '0 disables. Takes effect after restart', 0],
+  ['http', 'HTTP proxy', '0 disables. Takes effect after restart', 0],
+  ['dns', 'DNS', '0 disables. Takes effect after restart', 0],
   ['ui', 'Web UI', 'Takes effect after restart', 1],
 ];
 const grid = 'grid grid-cols-[repeat(auto-fill,minmax(min(100%,200px),1fr))] gap-4';

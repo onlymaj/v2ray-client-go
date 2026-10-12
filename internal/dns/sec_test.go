@@ -613,3 +613,40 @@ func TestTCPAcceptSurvivesEMFILE(t *testing.T) {
 	close(ln.done)
 	<-ret
 }
+
+// Round 11: with more sources in flight than upstream slots the fair share
+// rounded down to 0, so every source was over it with a single query and
+// got SERVFAIL at once instead of queueing.
+func TestOverShareAllowsOneQuery(t *testing.T) {
+	p := perSource{max: func(netip.Addr) int { return 16 }, n: map[netip.Addr]int{}}
+	for i := range 100 {
+		p.acquire(netip.AddrFrom4([4]byte{10, 0, 0, byte(i)}))
+	}
+	a := netip.AddrFrom4([4]byte{10, 0, 0, 1})
+	if p.overShare(a, 64) {
+		t.Fatal("a source with one query is over its share")
+	}
+	p.acquire(a)
+	if !p.overShare(a, 64) {
+		t.Fatal("a source with two queries among 100 sources is within its share")
+	}
+}
+
+// Round 11: a malformed packet with the response bit set was answered with
+// FORMERR, which is itself such a packet: two servers (or a spoofed source)
+// could bounce it without end.
+func TestMalformedResponseNotAnswered(t *testing.T) {
+	s := New(Options{Upstream: "192.0.2.1:53"})
+	src := netip.MustParseAddr("192.168.88.10")
+	noQuestion := []byte{0x12, 0x34, 0x80, 0x81, 0, 0, 0, 0, 0, 0, 0, 0}
+	truncated := append([]byte{0x12, 0x34, 0x80, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}, 5, 'a')
+	for _, pkt := range [][]byte{noQuestion, truncated} {
+		if r := s.handle(context.Background(), src, pkt); r != nil {
+			t.Fatalf("reply % x to response packet % x", r, pkt)
+		}
+	}
+	query := []byte{0x12, 0x34, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0} // a query still gets FORMERR
+	if r := s.handle(context.Background(), src, query); r == nil {
+		t.Fatal("malformed query not answered")
+	}
+}

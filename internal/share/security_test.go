@@ -116,3 +116,18 @@ func TestVLESSTCPHeaderRefused(t *testing.T) {
 		t.Fatalf("headerType=none refused: %v", err)
 	}
 }
+
+// Round 11: TLS settings the client does not implement (certificate pin,
+// verification by another name, ECH) were dropped without a word, giving a
+// weaker connection than the link's author asked for.
+func TestVLESSUnsupportedTLSSettingsRefused(t *testing.T) {
+	const l = "vless://11111111-1111-1111-1111-111111111111@a.example:443?security=tls&sni=a.example"
+	if _, err := Parse(l + "#x"); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"pcs=ab12", "vcn=other.example", "ech=AEX"} {
+		if _, err := Parse(l + "&" + p + "#x"); err == nil {
+			t.Errorf("%s accepted", p)
+		}
+	}
+}

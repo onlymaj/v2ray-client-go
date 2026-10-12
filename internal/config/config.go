@@ -84,6 +84,9 @@ type Subscription struct {
 	LastUpdate string `json:"lastUpdate,omitempty"` // RFC3339
 	Count      int    `json:"count"`
 	LastError  string `json:"lastError,omitempty"`
+	// Note says what a successful refresh left out or kept. It is not an
+	// error: the refresh was applied.
+	Note string `json:"note,omitempty"`
 }
 
 type Ports struct {

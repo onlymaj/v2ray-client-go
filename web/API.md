@@ -90,14 +90,14 @@ The server validates these fields: `name` and `address` must not be empty. `port
 - Imported clients are `untrusted` and have `allowInsecure` false.
 - `skipped` counts links that are already present (same address, port and uuid).
 
-Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
+Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", "note"}`. `lastError` is set only when the last refresh failed and changed nothing. `note` (omitted when empty) belongs to a refresh that was applied: how many links failed to parse and how many clients were kept.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/subscriptions` | — | `[Subscription]` |
 | POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. |
 | DELETE | `/api/subscriptions/:id` | — | `204`. The server also deletes the clients that came from this subscription, with the same cleanup as `DELETE /api/clients/:id`. |
-| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `lastError` says how many were kept. |
+| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
 
 ## Groups
 
@@ -144,7 +144,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 }
 ```
 
-`GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to `ports.ui` can take effect only after a restart. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`. The server also answers `400` when two ports are equal, when `ports.transparent` or `ports.ui` is 0, when `healthInterval` is outside 5–3600, or when `healthUrl` is not an http or https URL (`""` selects the default).
+`GET /api/settings` and `PUT /api/settings` (full object) both return the saved settings. A change to any port takes effect only after a restart of the container: the listeners are bound once at start. This includes setting `ports.socks`, `ports.http` or `ports.dns` to 0, which leaves the old listener open until then. `dnsUpstream` defaults to `"1.1.1.1:53"`. An invalid value gives `400 {"error":"dnsUpstream must be ip:port"}`. The server also answers `400` when two ports are equal, when `ports.transparent` or `ports.ui` is 0, when `healthInterval` is outside 5–3600, or when `healthUrl` is not an http or https URL (`""` selects the default).
 
 `allowPrivateServers` is off by default. While it is off, untrusted clients (from a subscription or `/api/import`) may not use private (RFC 1918, ULA) or CGNAT server addresses, so a malicious subscription or pasted link cannot aim health checks and connections at LAN devices. Clients saved through `POST /api/clients` or `PUT /api/clients/:id` that have no `subscriptionId` may always use them. Loopback, link-local, the container's own address and its gateway are always refused.
 

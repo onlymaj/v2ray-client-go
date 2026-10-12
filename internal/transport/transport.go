@@ -5,6 +5,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -15,6 +16,10 @@ import (
 type Layer interface {
 	Wrap(ctx context.Context, conn net.Conn) (net.Conn, error)
 }
+
+// ErrConnKept is wrapped by a Wrap error when the layer still uses conn and
+// closes it itself (Reality's fallback fetch). The caller must not close it.
+var ErrConnKept = errors.New("transport: connection kept by the layer")
 
 // Factory builds a Layer from its settings blob (the client's JSON config
 // for that layer).

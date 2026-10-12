@@ -220,7 +220,9 @@ func (c *Client) dialRaw(ctx context.Context) (net.Conn, error) {
 	}
 	sc, err := c.security.Wrap(ctx, conn)
 	if err != nil {
-		conn.Close()
+		if !errors.Is(err, transport.ErrConnKept) {
+			conn.Close()
+		}
 		return nil, err
 	}
 	return sc, nil

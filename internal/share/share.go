@@ -235,6 +235,15 @@ func ParseVLESS(link string) (Client, error) {
 	if q.Get("pqv") != "" {
 		return Client{}, errors.New("reality pqv (ML-DSA-65 verification) is not supported")
 	}
+	// The same goes for TLS settings that are not implemented: a pinned
+	// certificate (pcs), verification by another name (vcn) and encrypted
+	// client hello (ech). Dropping them would give a weaker connection
+	// than the link asks for, with no sign of it.
+	for _, k := range []string{"pcs", "vcn", "ech"} {
+		if q.Get(k) != "" {
+			return Client{}, fmt.Errorf("tls setting %q is not supported", k)
+		}
+	}
 	c := Client{
 		Name:        unescapeName(frag),
 		Protocol:    "vless",

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"time"
 
@@ -50,6 +51,10 @@ type layer struct {
 	publicKey *ecdh.PublicKey
 	shortID   [8]byte
 }
+
+// roots verifies a real (non-Reality) certificate; nil means the system
+// roots. Tests set it.
+var roots *x509.CertPool
 
 // spiders limits concurrent spider fetches.
 var spiders = make(chan struct{}, 2)
@@ -130,16 +135,21 @@ func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 		// server (MITM or redirection). Behave like a browser, then fail.
 		// At most two at a time: every failed dial would otherwise start
 		// one, each holding a connection for up to 10 s.
+		err := errors.New("reality: received real certificate (potential MITM or redirection)")
 		select {
 		case spiders <- struct{}{}:
 			go func() {
 				defer func() { <-spiders }()
 				spider(u, sni, l.s.SpiderX)
 			}()
+			// The caller would close conn under the spider before it sent
+			// its request, leaving a handshake followed by an instant
+			// close: the pattern the spider exists to avoid.
+			return nil, fmt.Errorf("%w (%w)", err, transport.ErrConnKept)
 		default:
 			u.Close()
 		}
-		return nil, errors.New("reality: received real certificate (potential MITM or redirection)")
+		return nil, err
 	}
 	return ntls.NewConn(u, rec), nil
 }
@@ -218,7 +228,7 @@ func verifyCert(rawCerts [][]byte, authKey []byte, sni string) (bool, error) {
 			return true, nil
 		}
 	}
-	opts := x509.VerifyOptions{DNSName: sni, Intermediates: x509.NewCertPool()}
+	opts := x509.VerifyOptions{DNSName: sni, Intermediates: x509.NewCertPool(), Roots: roots}
 	for _, c := range certs[1:] {
 		opts.Intermediates.AddCert(c)
 	}

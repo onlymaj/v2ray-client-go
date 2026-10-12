@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,5 +304,34 @@ func TestEvictedConnsStayCountedUntilReleased(t *testing.T) {
 	defer limits.Unlock()
 	if limits.total != 0 || limits.draining != 0 {
 		t.Fatalf("total=%d draining=%d after all released", limits.total, limits.draining)
+	}
+}
+
+// Round 11: CONNECT accepted host names up to the 8 KB header limit; every
+// other name source is capped near 255, and rule matching hashes each
+// suffix of the name.
+func TestHTTPConnectLongHostRefused(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := holdHandler{make(chan struct{})}
+	close(h.release)
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	defer func() { cancel(); <-served }()
+	go func() { ServeHTTP(ctx, ln, h); close(served) }()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	host := strings.Repeat("a.", 150) + "test:443"
+	c.Write([]byte("CONNECT " + host + " HTTP/1.1\r\nHost: " + host + "\r\n\r\n"))
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 64)
+	n, _ := c.Read(buf)
+	if !strings.HasPrefix(string(buf[:n]), "HTTP/1.1 400") {
+		t.Fatalf("300-byte CONNECT host answered %q, want 400", buf[:n])
 	}
 }

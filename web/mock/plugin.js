@@ -205,7 +205,7 @@ export function mockApi() {
             throw bad('url is invalid');
           }
           if (!/^https?:$/.test(u.protocol)) throw bad('url must be http or https');
-          const s = { id: S.newId('s'), name: String(b.name || '').trim() || u.hostname, url: b.url, lastUpdate: '', count: 0, lastError: '' };
+          const s = { id: S.newId('s'), name: String(b.name || '').trim() || u.hostname, url: b.url, lastUpdate: '', count: 0, lastError: '', note: '' };
           db.subscriptions.push(s);
           S.refreshSubscription(s);
           return [201, s];

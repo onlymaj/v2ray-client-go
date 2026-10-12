@@ -140,6 +140,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 			return errf(http.StatusNotFound, "subscription not found")
 		}
 		sp.LastUpdate = now
+		sp.Note = ""
 		if ferr != nil {
 			sp.LastError = clip(ferr.Error(), maxLastError)
 			out = *sp
@@ -207,7 +208,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		if kept > 0 {
 			notes = append(notes, fmt.Sprintf("%d clients no longer in the subscription are kept because rules use them", kept))
 		}
-		sp.LastError = strings.Join(notes, "; ")
+		sp.Note = strings.Join(notes, "; ")
 		out = *sp
 		return nil
 	})
