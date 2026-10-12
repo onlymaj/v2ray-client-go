@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
@@ -277,7 +278,7 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 			}
 			return err
 		}
-		if n < headerLen {
+		if n < headerLen || n > maxQuery {
 			continue
 		}
 		src := srcOf(from)
@@ -310,18 +311,24 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 
 func (s *Server) serveTCP(ctx context.Context, ln net.Listener) error {
 	conns := make(chan struct{}, 4*s.opts.MaxInFlight)
+	var delay time.Duration
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return net.ErrClosed
 			}
+			// Out of file descriptors is temporary; returning would end the
+			// whole process (same handling as inbound.serve).
 			var ne net.Error
-			if errors.As(err, &ne) && ne.Timeout() {
+			if errors.As(err, &ne) && ne.Timeout() || errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+				delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+				time.Sleep(delay)
 				continue
 			}
 			return err
 		}
+		delay = 0
 		src := srcOf(c.RemoteAddr())
 		if !s.tcpConns.acquire(src) {
 			c.Close()
@@ -349,7 +356,7 @@ func (s *Server) serveTCPConn(ctx context.Context, c net.Conn) {
 	src := srcOf(c.RemoteAddr())
 	for {
 		c.SetReadDeadline(time.Now().Add(s.opts.TCPIdleTimeout))
-		query, err := readMsg(c)
+		query, err := readMsg(c, maxQuery)
 		if err != nil {
 			return
 		}
@@ -452,10 +459,21 @@ func (s *Server) exchange(ctx context.Context, src netip.Addr, query []byte, q q
 	defer cancel()
 	select {
 	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return nil, false, fmt.Errorf("waiting for a free upstream slot: %w", ctx.Err())
+	default:
+		// All upstream slots are taken. A source already over its fair
+		// share (slots / active sources) fails at once instead of queueing,
+		// so a few devices sending queries that never get an answer cannot
+		// keep every slot: the others get the slots as they free up.
+		if s.maxInFlight(src) <= s.opts.MaxPerSource && s.queries.overShare(src, cap(s.sem)) {
+			return nil, false, errors.New("all upstream slots busy and source over its share")
+		}
+		select {
+		case s.sem <- struct{}{}:
+		case <-ctx.Done():
+			return nil, false, fmt.Errorf("waiting for a free upstream slot: %w", ctx.Err())
+		}
 	}
+	defer func() { <-s.sem }()
 
 	if upErr != nil {
 		return nil, false, upErr
@@ -518,7 +536,7 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 		return nil, err
 	}
 	for {
-		resp, err := readMsg(c)
+		resp, err := readMsg(c, 0xffff)
 		if err != nil {
 			return nil, err
 		}
@@ -606,12 +624,21 @@ func (s *Server) reapIdle(ctx context.Context) {
 	}
 }
 
-func readMsg(r io.Reader) ([]byte, error) {
+// maxQuery bounds a query from a client. Real queries are well under 512
+// bytes; the rest of a larger one would be held in memory while it waits and
+// then sent upstream through the proxy.
+const maxQuery = 4096
+
+func readMsg(r io.Reader, limit int) ([]byte, error) {
 	var l [2]byte
 	if _, err := io.ReadFull(r, l[:]); err != nil {
 		return nil, err
 	}
-	msg := make([]byte, binary.BigEndian.Uint16(l[:]))
+	n := int(binary.BigEndian.Uint16(l[:]))
+	if n > limit {
+		return nil, errors.New("message too long")
+	}
+	msg := make([]byte, n)
 	if _, err := io.ReadFull(r, msg); err != nil {
 		return nil, err
 	}
@@ -669,6 +696,14 @@ func (p *perSource) acquire(ip netip.Addr) bool {
 	}
 	p.n[k]++
 	return true
+}
+
+// overShare reports whether ip holds more than total / active sources.
+func (p *perSource) overShare(ip netip.Addr, total int) bool {
+	k := sourceKey(ip)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.n) > 0 && p.n[k] > total/len(p.n)
 }
 
 func (p *perSource) release(ip netip.Addr) {

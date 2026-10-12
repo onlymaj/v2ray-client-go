@@ -402,3 +402,30 @@ func TestRetryWriteFailurePolicy(t *testing.T) {
 		})
 	}
 }
+
+// Round 10: an armed Write held the mutex that Close needed, so a Write
+// stuck on a server that never reads could not be ended by the idle
+// watchdog or by a route change, and the conn leaked until restart.
+func TestRetryConnCloseDuringStuckWrite(t *testing.T) {
+	a, b := net.Pipe() // nothing reads b: Writes on a block
+	defer b.Close()
+	r := newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	wrote := make(chan error, 1)
+	go func() { _, err := r.Write([]byte("GET / HTTP/1.1\r\n")); wrote <- err }()
+	time.Sleep(50 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { r.SetDeadline(time.Now().Add(time.Hour)); r.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked behind the stuck Write")
+	}
+	select {
+	case err := <-wrote:
+		if err == nil {
+			t.Fatal("stuck Write succeeded")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Write not ended by Close")
+	}
+}

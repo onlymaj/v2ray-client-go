@@ -430,3 +430,35 @@ func TestResolveAllHoldAndStableCap(t *testing.T) {
 		}
 	}
 }
+
+// Round 10: names that never resolve were put first on every pass. A dozen
+// that are slow to fail used up the whole pass, so no name that had resolved
+// before was ever refreshed again.
+func TestResolveAllDeadNamesDoNotStarve(t *testing.T) {
+	defer func(d time.Duration) { maxResolvePass = d }(maxResolvePass)
+	maxResolvePass = 200 * time.Millisecond
+	fresh := netip.MustParseAddr("203.0.113.9")
+	s := New(Options{Resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
+		if host != "good.example" {
+			<-ctx.Done() // slow to fail
+			return nil, ctx.Err()
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return []netip.Addr{fresh}, nil
+	}})
+	cache := map[string][]netip.Addr{"good.example": {netip.MustParseAddr("203.0.113.1")}}
+	var hosts []string
+	s.firstFail = map[string]time.Time{}
+	for i := range 12 {
+		h := fmt.Sprintf("dead%d.example", i)
+		hosts = append(hosts, h)
+		s.firstFail[h] = time.Now()
+	}
+	hosts = append(hosts, "good.example")
+	s.resolveAll(context.Background(), hosts, cache)
+	if got := cache["good.example"]; len(got) != 1 || got[0] != fresh {
+		t.Fatalf("known name not refreshed behind dead names: %v", got)
+	}
+}

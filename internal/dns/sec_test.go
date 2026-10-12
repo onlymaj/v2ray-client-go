@@ -1,12 +1,15 @@
 package dns
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -177,7 +180,7 @@ func TestPerSourceTCPCap(t *testing.T) {
 		if err := writeMsg(c, buildQuery(1, "a.example", typeA, 0)); err != nil {
 			return err
 		}
-		_, err := readMsg(c)
+		_, err := readMsg(c, 0xffff)
 		return err
 	}
 	held := []net.Conn{dialFrom("127.0.0.1"), dialFrom("127.0.0.1")}
@@ -370,7 +373,7 @@ func TestSlipVictimFallsBackToTCP(t *testing.T) {
 	if err := writeMsg(c, q); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := readMsg(c)
+	resp, err := readMsg(c, 0xffff)
 	if err != nil {
 		t.Fatalf("TCP fallback: %v", err)
 	}
@@ -528,4 +531,85 @@ func TestCacheVariant(t *testing.T) {
 			t.Errorf("%s: variant %q shared %v, want %q %v", tc.name, v, s, tc.variant, tc.shared)
 		}
 	}
+}
+
+// Round 10: four source addresses, each within the per-source cap, could
+// hold every upstream slot with queries that never get an answer, so every
+// other device waited out the timeout. With all slots taken, a source over
+// its fair share now fails at once and the others get the freed slots.
+func TestUpstreamSlotsFairShare(t *testing.T) {
+	up := newFakeUpstream(t)
+	up.delay = 500 * time.Millisecond
+	s := New(Options{Upstream: up.ln.Addr().String(), Dial: directDial(&dialRecord{}), MaxInFlight: 4, MaxPerSource: 3})
+	ctx := context.Background()
+	a, b, c := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.2"), netip.MustParseAddr("10.0.0.3")
+	for i, src := range []netip.Addr{a, a, b, b} {
+		go s.handle(ctx, src, buildQuery(1, fmt.Sprintf("slow%d.example", i), typeA, 0))
+	}
+	for i := 0; up.queries.Load() < 4 && i < 100; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	other := make(chan int, 1)
+	go func() { other <- rcodeOf(t, s.handle(ctx, c, buildQuery(1, "other.example", typeA, 0))) }()
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	if rc := rcodeOf(t, s.handle(ctx, a, buildQuery(1, "more.example", typeA, 0))); rc != rcodeServFail {
+		t.Fatalf("source over its share with all slots busy: rcode %d", rc)
+	}
+	if time.Since(start) > 200*time.Millisecond {
+		t.Fatal("source over its share queued for a slot")
+	}
+	if rc := <-other; rc != rcodeNoError {
+		t.Fatalf("source within its share: rcode %d", rc)
+	}
+}
+
+// Round 10: a client query could be 64 KB (the parser ignores bytes after
+// the question); 256 of them waiting pinned 16 MB.
+func TestClientQuerySizeBounded(t *testing.T) {
+	big := append([]byte{0xff, 0xff}, make([]byte, 0xffff)...)
+	if _, err := readMsg(bytes.NewReader(big), maxQuery); err == nil {
+		t.Fatal("64 KB TCP query accepted")
+	}
+	if m, err := readMsg(bytes.NewReader(big), 0xffff); err != nil || len(m) != 0xffff {
+		t.Fatalf("upstream-sized message refused: %v", err)
+	}
+}
+
+type emfileListener struct {
+	net.Listener
+	calls atomic.Int32
+	done  chan struct{}
+}
+
+func (l *emfileListener) Accept() (net.Conn, error) {
+	if l.calls.Add(1) <= 3 {
+		return nil, &net.OpError{Op: "accept", Err: syscall.EMFILE}
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+
+// Round 10: one "too many open files" from Accept ended the DNS server and,
+// through it, the whole process.
+func TestTCPAcceptSurvivesEMFILE(t *testing.T) {
+	s := New(Options{Upstream: "192.0.2.1:53"})
+	ln := &emfileListener{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	ret := make(chan error, 1)
+	go func() { ret <- s.serveTCP(ctx, ln) }()
+	for i := 0; ln.calls.Load() < 4 && i < 200; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	select {
+	case err := <-ret:
+		t.Fatalf("serveTCP returned on EMFILE: %v", err)
+	default:
+	}
+	if ln.calls.Load() < 4 {
+		t.Fatal("Accept not retried after EMFILE")
+	}
+	cancel()
+	close(ln.done)
+	<-ret
 }

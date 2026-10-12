@@ -60,7 +60,9 @@ function validateClient(c) {
   if (!TLS.includes(c.tls)) throw bad('tls must be none, tls or reality');
   if (c.tls === 'reality' && c.protocol !== 'vless') throw bad('reality requires vless');
   if (c.tls === 'reality' && !c.publicKey) throw bad('reality requires publicKey');
-  if (!/^[0-9a-f-]{32,36}$/i.test(c.uuid || '')) throw bad('uuid is invalid');
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(c.uuid || '')) throw bad('uuid is invalid');
+  if (!['', 'chrome', 'firefox', 'safari', 'random'].includes(c.fingerprint || '')) throw bad('unknown fingerprint ' + c.fingerprint);
+  if (!['', 'xtls-rprx-vision', 'xtls-rprx-vision-udp443'].includes(c.flow || '')) throw bad('unsupported flow ' + c.flow);
   if (!Array.isArray(c.alpn)) c.alpn = String(c.alpn || '').split(',').map((s) => s.trim()).filter(Boolean);
 }
 

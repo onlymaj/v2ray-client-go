@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
@@ -75,7 +76,10 @@ func (s *server) getClient(w http.ResponseWriter, r *http.Request) {
 
 // validateClient checks protocol-level fields that config.Validate leaves
 // to the dialer, so mistakes surface as 400 instead of a dead client.
-func validateClient(c *config.Client) error {
+func (s *server) validateClient(c *config.Client) error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errf(http.StatusBadRequest, "name must not be empty")
+	}
 	if c.Network == "" {
 		c.Network = "tcp"
 	}
@@ -87,7 +91,31 @@ func validateClient(c *config.Client) error {
 		return errf(http.StatusBadRequest, "%v", err)
 	}
 	c.Security = sc.Security // Validate stores the canonical VMess cipher
+	if err := s.check(*c); err != nil {
+		return errf(http.StatusBadRequest, "%v", err)
+	}
 	return nil
+}
+
+// usable moves the clients of res that no dialer can be built for (a uuid
+// that is not a UUID, an unknown flow or fingerprint, a bad Reality key) to
+// its errors, so a link is refused when it is imported instead of becoming
+// a client that can never connect.
+func (s *server) usable(res share.Result) share.Result {
+	ok := res.Clients[:0:0]
+	for _, sc := range res.Clients {
+		if err := s.check(config.FromShare(sc)); err != nil {
+			text := sc.Name
+			if text == "" {
+				text = sc.Address
+			}
+			res.Errors = append(res.Errors, share.LineError{Text: clip(text, 80), Err: err.Error()})
+			continue
+		}
+		ok = append(ok, sc)
+	}
+	res.Clients = ok
+	return res
 }
 
 func (s *server) createClient(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +127,7 @@ func (s *server) createClient(w http.ResponseWriter, r *http.Request) {
 	c.ID = config.NewID()
 	c.SubscriptionID = ""
 	c.Untrusted = false // saved through the form: the admin vouches for it
-	if err := validateClient(&c); err != nil {
+	if err := s.validateClient(&c); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -125,7 +153,7 @@ func (s *server) putClient(w http.ResponseWriter, r *http.Request) {
 	}
 	c.ID = id
 	c.Untrusted = false // saved through the form: the admin vouches for it
-	if err := validateClient(&c); err != nil {
+	if err := s.validateClient(&c); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -219,7 +247,8 @@ func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	res := share.ParseBulk(body.Text)
+	// Like a subscription body, the pasted text may be base64 as a whole.
+	res := s.usable(share.DecodeSubscription([]byte(body.Text)))
 	if err := tooManyLinks(res); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

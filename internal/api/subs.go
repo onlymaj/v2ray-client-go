@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
+	"github.com/onlymaj/v2ray-client-go/internal/router"
 	"github.com/onlymaj/v2ray-client-go/internal/share"
 )
 
@@ -123,7 +125,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	body, ferr := s.fetch(r.Context(), sub.URL)
 	var res share.Result
 	if ferr == nil {
-		res = share.DecodeSubscription(body)
+		res = s.usable(share.DecodeSubscription(body))
 		if ferr = tooManyLinks(res); ferr == nil && len(res.Clients) == 0 {
 			ferr = fmt.Errorf("no supported links (%d errors, %d skipped)", len(res.Errors), res.Skipped)
 		}
@@ -172,20 +174,40 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 			next = append(next, c)
 		}
 		cfg.Clients = append(others, next...)
-		for _, gone := range old {
-			for _, c := range gone {
-				cfg.RemoveClient(c.ID)
+		// A client that left the subscription goes, except one a rule
+		// points at. Removing it would remove the rule too, and that
+		// traffic would follow the later rules (perhaps direct) on the
+		// provider's say. Kept, it most likely stops answering and the
+		// kill switch applies; the admin deletes it and sees the warning.
+		ruled := map[string]bool{}
+		for _, r := range cfg.Rules {
+			if r.Target.Kind == router.KindClient {
+				ruled[r.Target.ID] = true
+			}
+		}
+		kept := 0
+		for _, sc := range sortedGone(old) {
+			if ruled[sc.ID] {
+				cfg.Clients = append(cfg.Clients, sc)
+				kept++
+			} else {
+				cfg.RemoveClient(sc.ID)
 			}
 		}
 		if g := cfg.Group("default"); g != nil {
 			g.Members = append(g.Members, fresh...)
 		}
 
-		sp.Count = len(next)
+		sp.Count = len(next) + kept
 		sp.LastError = ""
+		var notes []string
 		if n := len(res.Errors); n > 0 {
-			sp.LastError = fmt.Sprintf("%d links failed to parse", n)
+			notes = append(notes, fmt.Sprintf("%d links failed to parse", n))
 		}
+		if kept > 0 {
+			notes = append(notes, fmt.Sprintf("%d clients no longer in the subscription are kept because rules use them", kept))
+		}
+		sp.LastError = strings.Join(notes, "; ")
 		out = *sp
 		return nil
 	})
@@ -211,4 +233,14 @@ func clip(s string, n int) string {
 		return strings.ToValidUTF8(s, "")
 	}
 	return strings.ToValidUTF8(s[:n], "") + "..."
+}
+
+// sortedGone returns the clients left in old in a stable order.
+func sortedGone(old map[string][]config.Client) []config.Client {
+	var out []config.Client
+	for _, l := range old {
+		out = append(out, l...)
+	}
+	slices.SortFunc(out, func(a, b config.Client) int { return strings.Compare(a.ID, b.ID) })
+	return out
 }

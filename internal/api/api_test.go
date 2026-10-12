@@ -52,6 +52,7 @@ type env struct {
 	rt     *fakeRT
 	mu     sync.Mutex
 	subs   map[string]string // url -> body for the fake fetch
+	check  func(config.Client) error
 }
 
 func (e *env) setSub(url, body string) {
@@ -74,6 +75,12 @@ func newEnv(t *testing.T) *env {
 	h, err := New(Options{
 		Store: st, Bus: e.bus, Runtime: e.rt, AdminPassword: "s3cret",
 		Web: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ui") }),
+		CheckClient: func(c config.Client) error {
+			if e.check != nil {
+				return e.check(c)
+			}
+			return nil
+		},
 		Fetch: func(ctx context.Context, url string) ([]byte, error) {
 			e.mu.Lock()
 			defer e.mu.Unlock()

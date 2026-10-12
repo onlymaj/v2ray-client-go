@@ -38,7 +38,7 @@ func TestDecodeHunks(t *testing.T) {
 	// 2 (varint 150) and 3 (bytes "zz").
 	msg := []byte{0x0A, 2, 'a', 'b', 0x10, 0x96, 0x01, 0x0A, 0, 0x1A, 2, 'z', 'z', 0x0A, 1, 'c'}
 	got, err := decodeHunks(msg)
-	if err != nil || len(got) != 2 || string(got[0]) != "ab" || string(got[1]) != "c" {
+	if err != nil || string(got) != "abc" {
 		t.Fatalf("%q %v", got, err)
 	}
 	for _, bad := range [][]byte{{0x0A, 5, 'a'}, {0x0A}, {0x0B}, {0x80}} {
@@ -51,7 +51,7 @@ func TestDecodeHunks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := decodeHunks(m); len(got) != 1 || string(got[0]) != "hello" {
+	if got, _ := decodeHunks(m); string(got) != "hello" {
 		t.Fatalf("%q", got)
 	}
 }
@@ -129,8 +129,11 @@ func (s *gunServer) handle(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		entries, _ := decodeHunks(m)
-		for _, e := range entries {
+		data, _ := decodeHunks(m)
+		for _, e := range [][]byte{data} {
+			if len(e) == 0 {
+				continue
+			}
 			var out []byte
 			if s.multi && len(e) > 1 {
 				h := len(e) / 2

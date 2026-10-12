@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/onlymaj/v2ray-client-go/internal/api"
+	"github.com/onlymaj/v2ray-client-go/internal/client"
 	"github.com/onlymaj/v2ray-client-go/internal/config"
 	"github.com/onlymaj/v2ray-client-go/internal/dispatch"
 	"github.com/onlymaj/v2ray-client-go/internal/dns"
@@ -198,6 +199,13 @@ func run() error {
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
 		AllowedHosts:  splitList(os.Getenv("UI_HOSTS")),
 		Web:           web.Handler(),
+		CheckClient: func(c config.Client) error {
+			cl, err := client.Build(c, client.Options{})
+			if err == nil {
+				cl.Close()
+			}
+			return err
+		},
 	})
 	if err != nil {
 		return err

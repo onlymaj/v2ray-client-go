@@ -79,14 +79,14 @@ The mock accepts the password `admin`.
 
 `allowInsecure` turns off TLS certificate verification, so an on-path attacker can read the traffic. Share links cannot set it: the server ignores `allowInsecure`/`insecure` in links and never writes it into exported links. Subscription refreshes always reset it to false. Only the editor can turn it on. VMess allows its chunk nonce to wrap only inside REALITY or TLS with `allowInsecure` off.
 
-The server validates these fields: `name` and `address` must not be empty. `port` must be 1–65535. `uuid` must be a UUID. The enum fields must have one of the values listed above. `reality` requires `vless` and a `publicKey`.
+The server validates these fields: `name` and `address` must not be empty. `port` must be 1–65535. `uuid` must be a UUID in the 8-4-4-4-12 hex form. The enum fields must have one of the values listed above, including `flow` and `fingerprint`. `reality` requires `vless` and a valid `publicKey` and `shortId`. The server refuses with `400` any client it could not build a connection for, so a saved client is never unusable for a reason the editor could have shown.
 
 ## Import and subscriptions
 
 `POST /api/import` `{"text": "..."}` → `{"added": [Client], "errors": [{"line": 3, "text": "ss://...", "error": "unsupported scheme"}], "skipped": 1}`
 
 - `text` contains one `vless://` or `vmess://` link per line. The server ignores blank lines and lines that start with `#`. If the whole text is base64, the server decodes it first. This is the usual subscription body format.
-- `line` is 1-based. `text` is the offending line, truncated to 80 characters.
+- `line` is 1-based. `text` is the offending line, truncated to 256 characters. A link that parses but cannot be used (for example an unknown `fp`, a `uuid` that is not a UUID, or `headerType=http`) is reported the same way; if it was found after parsing, `line` is 0 and `text` is the client's name.
 - Imported clients are `untrusted` and have `allowInsecure` false.
 - `skipped` counts links that are already present (same address, port and uuid).
 
@@ -97,7 +97,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError"}`
 | GET | `/api/subscriptions` | — | `[Subscription]` |
 | POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. |
 | DELETE | `/api/subscriptions/:id` | — | `204`. The server also deletes the clients that came from this subscription, with the same cleanup as `DELETE /api/clients/:id`. |
-| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. |
+| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `lastError` says how many were kept. |
 
 ## Groups
 

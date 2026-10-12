@@ -260,11 +260,12 @@ func (s *Syncer) backoff(fails int) time.Duration {
 const (
 	maxAddrsPerHost = 8
 	maxAddrs        = 2048
-	maxResolvePass  = 2 * time.Minute
 	// unresolvedHold is how long a name that has never resolved keeps
 	// entries from being removed (long enough for DNS to come up at boot).
 	unresolvedHold = 15 * time.Minute
 )
+
+var maxResolvePass = 2 * time.Minute // a variable for tests
 
 // resolveAll returns the sorted, de-duplicated IPv4 addresses of hosts.
 // A host that fails to resolve keeps its last good addresses in cache so a
@@ -275,31 +276,46 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 	// changes for hours. Hosts not reached keep their cached addresses.
 	ctx, cancelAll := context.WithTimeout(ctx, maxResolvePass)
 	defer cancelAll()
-	// The deadline can end a pass early. Names never resolved go first and
-	// the rest start one further on each pass, so the same names at the end
-	// of the list are not the ones skipped every time.
+	// The deadline can end a pass early, so the order decides who is
+	// skipped. Names seen for the first time go first. Names that resolved
+	// before come next and start one further on each pass, so the same names
+	// at the end of the list are not the ones skipped every time. Names that
+	// have never resolved go last and get the last quarter of the pass to
+	// themselves: dead names (common in subscription lists) are slow to fail
+	// and must not keep the others from being refreshed.
 	s.pass++
-	var fresh, known []string
+	if s.firstFail == nil {
+		s.firstFail = map[string]time.Time{}
+	}
+	var fresh, known, failing []string
 	for _, h := range hosts {
-		if _, ok := cache[strings.Trim(strings.TrimSpace(h), "[]")]; ok {
+		k := strings.Trim(strings.TrimSpace(h), "[]")
+		if _, ok := cache[k]; ok {
 			known = append(known, h)
+		} else if _, ok := s.firstFail[k]; ok {
+			failing = append(failing, h)
 		} else {
 			fresh = append(fresh, h)
 		}
 	}
-	if n := len(known); n > 0 {
+	rotate := func(l []string) []string {
+		n := len(l)
+		if n == 0 {
+			return l
+		}
 		k := s.pass % n
-		known = append(known[k:n:n], known[:k]...)
+		return append(l[k:n:n], l[:k]...)
 	}
+	failing = rotate(failing)
 	order := hosts // config order: the admin's own clients come first
-	hosts = append(fresh, known...)
-	if s.firstFail == nil {
-		s.firstFail = map[string]time.Time{}
-	}
+	hosts = append(append(fresh, rotate(known)...), failing...)
+	liveCtx, cancelLive := context.WithTimeout(ctx, maxResolvePass*3/4)
+	defer cancelLive()
+	failingFrom := len(hosts) - len(failing)
 	now := time.Now()
 	var errs []error
 	seen := map[string]bool{}
-	for _, h := range hosts {
+	for i, h := range hosts {
 		h = strings.Trim(strings.TrimSpace(h), "[]")
 		if h == "" || seen[h] {
 			continue
@@ -308,7 +324,11 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 		if _, err := netip.ParseAddr(h); err == nil {
 			continue
 		}
-		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		pctx := liveCtx
+		if i >= failingFrom {
+			pctx = ctx
+		}
+		rctx, cancel := context.WithTimeout(pctx, 10*time.Second)
 		ips, err := s.opts.Resolve(rctx, h)
 		cancel()
 		if err != nil {

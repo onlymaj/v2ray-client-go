@@ -40,15 +40,22 @@ const handshakeTimeout = 10 * time.Second
 // many addresses can neither evict a host within its share nor kill
 // anyone's long-lived conns: only the newest conns of an over-share source
 // go.
+//
+// An evicted conn's handler can outlive it (a dial in progress runs up to
+// 15 s before it sees the closed conn), so it stays counted as draining
+// until the handler returns, and nothing more is evicted while maxDraining
+// handlers are in that state. Handlers never exceed maxConns + maxDraining.
 var (
 	maxConns      = 512
 	maxConnsPerIP = 128
+	maxDraining   = 32
 )
 
 var limits = struct {
 	sync.Mutex
-	total int
-	per   map[netip.Addr]*list.List // source key -> its *slot, oldest first
+	total    int
+	draining int                       // evicted conns whose handler has not returned yet
+	per      map[netip.Addr]*list.List // source key -> its *slot, oldest first
 }{per: map[netip.Addr]*list.List{}}
 
 // slot is one open conn counted against the limits.
@@ -102,12 +109,13 @@ func acquire(c net.Conn, ip netip.Addr) *slot {
 				heavy = l
 			}
 		}
-		if n >= share || heavy == nil || heavy.Len() <= share {
+		if n >= share || heavy == nil || heavy.Len() <= share || limits.draining >= maxDraining {
 			return nil
 		}
 		old := heavy.Back().Value.(*slot)
 		old.evicted = true
 		removeLocked(old)
+		limits.draining++
 		victim = old.conn
 	}
 	l := limits.per[key]
@@ -124,7 +132,9 @@ func acquire(c net.Conn, ip netip.Addr) *slot {
 func release(s *slot) {
 	limits.Lock()
 	defer limits.Unlock()
-	if !s.evicted {
+	if s.evicted {
+		limits.draining--
+	} else {
 		removeLocked(s)
 	}
 }

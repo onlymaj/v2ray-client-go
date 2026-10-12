@@ -260,3 +260,48 @@ func TestAddrDropsZone(t *testing.T) {
 		t.Fatal("dest rules would not match the address")
 	}
 }
+
+// Round 10: an evicted conn left the count at once, but its handler can run
+// on for the rest of a dial (10-15 s). A device with five addresses could
+// cycle evictions and keep far more handlers and outbound sockets alive than
+// maxConns. Evicted conns now stay counted until their handler returns.
+func TestEvictedConnsStayCountedUntilReleased(t *testing.T) {
+	setLimits(t, 4, 10)
+	limits.Lock()
+	oldD := maxDraining
+	maxDraining = 2
+	limits.Unlock()
+	defer func() { limits.Lock(); maxDraining = oldD; limits.Unlock() }()
+	get := func(ip string) *slot {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		return acquire(a, netip.MustParseAddr(ip))
+	}
+	var heavy, others []*slot
+	for range 4 {
+		heavy = append(heavy, get("192.0.2.1"))
+	}
+	for _, ip := range []string{"192.0.2.2", "192.0.2.3"} {
+		s := get(ip)
+		if s == nil {
+			t.Fatalf("%s refused instead of evicting", ip)
+		}
+		others = append(others, s)
+	}
+	if s := get("192.0.2.4"); s != nil {
+		t.Fatal("a third eviction went ahead with two evicted handlers still running")
+	}
+	release(heavy[3]) // an evicted handler returns
+	s := get("192.0.2.4")
+	if s == nil {
+		t.Fatal("eviction still refused after an evicted handler returned")
+	}
+	for _, s := range append(append(heavy[:3], others...), s) {
+		release(s)
+	}
+	limits.Lock()
+	defer limits.Unlock()
+	if limits.total != 0 || limits.draining != 0 {
+		t.Fatalf("total=%d draining=%d after all released", limits.total, limits.draining)
+	}
+}

@@ -75,6 +75,10 @@ type Options struct {
 	AllowedHosts []string
 	// Fetch downloads a subscription. Default: HTTP GET, 30s timeout, 4 MB cap.
 	Fetch func(ctx context.Context, url string) ([]byte, error)
+	// CheckClient reports whether a dialer can be built for c (uuid form,
+	// flow, fingerprint, Reality key). Without it, such mistakes are saved
+	// and surface only as a dead client. No connection is made.
+	CheckClient func(c config.Client) error
 }
 
 const (
@@ -90,6 +94,7 @@ type server struct {
 	rt    Runtime
 	web   http.Handler
 	fetch func(ctx context.Context, url string) ([]byte, error)
+	check func(config.Client) error
 	auth  *auth
 	hosts map[string]bool
 	mux   *http.ServeMux
@@ -106,7 +111,7 @@ func New(opts Options) (http.Handler, error) {
 	}
 	s := &server{
 		store: opts.Store, bus: opts.Bus, rt: opts.Runtime, web: opts.Web,
-		fetch: opts.Fetch, auth: a, hosts: map[string]bool{}, mux: http.NewServeMux(),
+		fetch: opts.Fetch, check: opts.CheckClient, auth: a, hosts: map[string]bool{}, mux: http.NewServeMux(),
 	}
 	for _, h := range opts.AllowedHosts {
 		if h = normHost(h); h != "" {
@@ -121,6 +126,9 @@ func New(opts Options) (http.Handler, error) {
 	}
 	if s.fetch == nil {
 		s.fetch = defaultFetch
+	}
+	if s.check == nil {
+		s.check = func(config.Client) error { return nil }
 	}
 	s.routes()
 	return s, nil
@@ -462,7 +470,7 @@ var blockedPrefixes = []netip.Prefix{
 // blockedAddr reports whether a is loopback, link-local, private (RFC 1918,
 // ULA), CGNAT, multicast or unspecified.
 func blockedAddr(a netip.Addr) bool {
-	a = a.Unmap()
+	a = a.WithZone("").Unmap() // a zone must not hide a loopback or NAT64 address
 	if a.Is6() && blockedPrefixes[2].Contains(a) {
 		b := a.As16()
 		return blockedAddr(netip.AddrFrom4([4]byte(b[12:])))

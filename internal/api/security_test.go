@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
+	"github.com/onlymaj/v2ray-client-go/internal/router"
 	"github.com/onlymaj/v2ray-client-go/internal/share"
 )
 
@@ -197,6 +199,7 @@ func TestBlockedAddr(t *testing.T) {
 		"100.64.0.1": true, "169.254.1.1": true, "0.0.0.0": true, "0.1.2.3": true,
 		"::1": true, "fd00::1": true, "fe80::1": true, "::": true, "::ffff:127.0.0.1": true,
 		"64:ff9b::a00:1": true, "224.0.0.1": true,
+		"::1%lo": true, "64:ff9b::a00:1%eth0": true, // round 10: a zone must not hide the address
 		"1.1.1.1": false, "8.8.8.8": false, "2606:4700::1111": false, "64:ff9b::808:808": false,
 	} {
 		if got := blockedAddr(netip.MustParseAddr(s)); got != want {
@@ -443,5 +446,88 @@ func TestFetchPinsOneAddress(t *testing.T) {
 	}
 	if _, err := defaultFetch(context.Background(), "http://sub.example:"+sport+"/"); !errors.Is(err, errRedirectBlocked) {
 		t.Fatalf("mixed public/private answer: err = %v", err)
+	}
+}
+
+// Round 10: a client no dialer can be built for (a uuid that is not a UUID,
+// fp=ios, a bad Reality key) was saved with 200/201 and then never worked;
+// the reason went only to the container log. Save and import now refuse it.
+func TestUnusableClientRefused(t *testing.T) {
+	e := newEnv(t)
+	e.check = func(c config.Client) error {
+		if c.Fingerprint == "ios" {
+			return errors.New("tls: unknown fingerprint ios")
+		}
+		return nil
+	}
+	e.login()
+	body := map[string]any{"name": "x", "protocol": "vless", "address": "a.example", "port": 443,
+		"uuid": u1, "network": "tcp", "tls": "tls", "fingerprint": "ios"}
+	e.expect("POST", "/api/clients", body, 400, nil)
+	body["fingerprint"], body["name"] = "chrome", " "
+	e.expect("POST", "/api/clients", body, 400, nil)
+	body["name"] = "x"
+	e.expect("POST", "/api/clients", body, 201, nil)
+
+	var res struct {
+		Added  []clientView      `json:"added"`
+		Errors []share.LineError `json:"errors"`
+	}
+	text := "vless://" + u2 + "@b.example:443?security=tls&fp=ios#bad\n" + link(t, "good", "c.example", 443, u3)
+	e.expect("POST", "/api/import", map[string]string{"text": text}, 200, &res)
+	if len(res.Added) != 1 || len(res.Errors) != 1 || !strings.Contains(res.Errors[0].Err, "fingerprint") {
+		t.Fatalf("import: %+v", res)
+	}
+}
+
+// Round 10: the API document, the UI and the mock all said a pasted base64
+// subscription body is decoded; the server counted it as one skipped line.
+func TestImportBase64Body(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	text := base64.StdEncoding.EncodeToString([]byte(link(t, "one", "a.example", 443, u1) + "\n" + link(t, "two", "b.example", 443, u2)))
+	var res struct {
+		Added []clientView `json:"added"`
+	}
+	e.expect("POST", "/api/import", map[string]string{"text": text}, 200, &res)
+	if len(res.Added) != 2 {
+		t.Fatalf("base64 body: %d clients added, want 2", len(res.Added))
+	}
+}
+
+// Round 10: when a client left a subscription (the provider only has to
+// change its uuid or path), the refresh deleted the rules pointing at it and
+// that traffic followed the later rules, e.g. default → direct. A client a
+// rule points at now stays until the admin deletes it.
+func TestRefreshKeepsClientARuleUses(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	const url = "https://sub.example/s"
+	e.setSub(url, link(t, "one", "a.example", 443, u1)+"\n"+link(t, "two", "b.example", 443, u2))
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"name": "S", "url": url}, 201, &sub)
+	var one, two string
+	for _, c := range e.store.Get().Clients {
+		if c.UUID == u1 {
+			one = c.ID
+		} else {
+			two = c.ID
+		}
+	}
+	e.expect("PUT", "/api/rules", []router.Rule{
+		{ID: "r", Type: "source", Values: []string{"192.168.88.50"}, Target: router.Target{Kind: "client", ID: one}},
+		{ID: "default", Type: "default", Target: router.Target{Kind: "direct"}},
+	}, 200, nil)
+	e.setSub(url, link(t, "one moved", "a.example", 443, u3))
+	e.expect("POST", "/api/subscriptions/"+sub.ID+"/refresh", nil, 200, &sub)
+	cfg := e.store.Get()
+	if len(cfg.Rules) != 2 || cfg.Rules[0].Target.ID != one || cfg.Client(one) == nil {
+		t.Fatalf("rule or its client removed by the refresh: %+v", cfg.Rules)
+	}
+	if cfg.Client(two) != nil {
+		t.Fatal("a client no rule uses was kept")
+	}
+	if sub.Count != 2 || !strings.Contains(sub.LastError, "kept because rules use them") {
+		t.Fatalf("subscription does not report the kept client: %+v", sub)
 	}
 }

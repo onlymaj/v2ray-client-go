@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,21 +28,28 @@ const retryLimit = 16 << 10
 type retryConn struct {
 	redial func() (net.Conn, error)
 
-	mu     sync.Mutex // held during armed Writes and the redial
+	mu    sync.Mutex // held during armed Writes and the redial
+	armed atomic.Bool
+	sent  []byte
+
+	// st guards cur and closed and is never held across I/O: Close and the
+	// deadline setters must work while a Write is stuck holding mu, or
+	// nothing could end that Write. cur changes only with mu held as well.
+	st     sync.Mutex
 	cur    net.Conn
-	armed  bool
 	closed bool
-	sent   []byte
 }
 
 func newRetryConn(c net.Conn, redial func() (net.Conn, error)) *retryConn {
-	return &retryConn{cur: c, redial: redial, armed: true}
+	r := &retryConn{cur: c, redial: redial}
+	r.armed.Store(true)
+	return r
 }
 
 func (r *retryConn) conn() (net.Conn, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cur, r.armed
+	r.st.Lock()
+	defer r.st.Unlock()
+	return r.cur, r.armed.Load()
 }
 
 // retry replaces old with a fresh conn unless that already happened. The
@@ -50,15 +58,31 @@ func (r *retryConn) retryLocked(old net.Conn) error {
 	if r.cur != old {
 		return nil
 	}
-	if !r.armed || r.closed {
+	if !r.armed.Load() {
 		return net.ErrClosed
 	}
-	r.armed = false
+	r.armed.Store(false)
 	old.Close()
+	r.st.Lock()
+	closed := r.closed
+	r.st.Unlock()
+	if closed {
+		return net.ErrClosed
+	}
 	nc, err := r.redial()
 	if err != nil {
 		return err
 	}
+	// The new conn becomes current before the replay so that Close can end
+	// a replay Write that blocks.
+	r.st.Lock()
+	if r.closed { // closed during the redial
+		r.st.Unlock()
+		nc.Close()
+		return net.ErrClosed
+	}
+	r.cur = nc
+	r.st.Unlock()
 	if len(r.sent) > 0 {
 		if _, err := nc.Write(r.sent); err != nil {
 			nc.Close()
@@ -66,13 +90,12 @@ func (r *retryConn) retryLocked(old net.Conn) error {
 		}
 	}
 	r.sent = nil
-	r.cur = nc
 	return nil
 }
 
 func (r *retryConn) Write(p []byte) (int, error) {
 	r.mu.Lock()
-	if !r.armed {
+	if !r.armed.Load() {
 		c := r.cur
 		r.mu.Unlock()
 		return c.Write(p)
@@ -82,14 +105,16 @@ func (r *retryConn) Write(p []byte) (int, error) {
 	n, err := old.Write(p)
 	if err == nil {
 		if len(r.sent)+len(p) > retryLimit {
-			r.armed, r.sent = false, nil
+			r.armed.Store(false)
+			r.sent = nil
 		} else {
 			r.sent = append(r.sent, p...)
 		}
 		return n, nil
 	}
 	if !onlyTLSHandshake(r.sent) {
-		r.armed, r.sent = false, nil
+		r.armed.Store(false)
+		r.sent = nil
 		return n, err
 	}
 	if r.retryLocked(old) != nil {
@@ -108,7 +133,8 @@ func (r *retryConn) Read(p []byte) (int, error) {
 	if n > 0 || err == nil || errors.As(err, &ne) && ne.Timeout() {
 		r.mu.Lock()
 		if r.cur == c {
-			r.armed, r.sent = false, nil
+			r.armed.Store(false)
+			r.sent = nil
 		}
 		r.mu.Unlock()
 		return n, err
@@ -118,7 +144,8 @@ func (r *retryConn) Read(p []byte) (int, error) {
 	if r.cur != c || onlyTLSHandshake(r.sent) {
 		rerr = r.retryLocked(c)
 	} else {
-		r.armed, r.sent = false, nil
+		r.armed.Store(false)
+		r.sent = nil
 	}
 	nc := r.cur
 	r.mu.Unlock()
@@ -145,10 +172,10 @@ func onlyTLSHandshake(b []byte) bool {
 }
 
 func (r *retryConn) Close() error {
-	r.mu.Lock()
+	r.st.Lock()
 	r.closed = true
 	c := r.cur
-	r.mu.Unlock()
+	r.st.Unlock()
 	return c.Close()
 }
 

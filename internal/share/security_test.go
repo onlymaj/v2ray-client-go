@@ -104,3 +104,15 @@ func TestParseBulkManyLinesIsCheap(t *testing.T) {
 		t.Fatalf("line numbers changed: %+v", r)
 	}
 }
+
+// Round 10: a VLESS link asking for the HTTP header disguise on TCP was
+// accepted and the setting dropped; the VMess parser already refused it.
+func TestVLESSTCPHeaderRefused(t *testing.T) {
+	const l = "vless://11111111-1111-1111-1111-111111111111@a.example:443?type=tcp&headerType="
+	if _, err := Parse(l + "http#x"); err == nil {
+		t.Fatal("headerType=http accepted")
+	}
+	if _, err := Parse(l + "none#x"); err != nil {
+		t.Fatalf("headerType=none refused: %v", err)
+	}
+}

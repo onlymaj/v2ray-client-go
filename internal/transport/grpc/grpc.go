@@ -305,7 +305,7 @@ func (c *Client) open(cc *http2.ClientConn, raw net.Conn) (*streamConn, error) {
 	s := &streamConn{
 		raw: raw, cancel: cancel,
 		done: make(chan struct{}),
-		rch:  make(chan [][]byte), wch: make(chan []byte),
+		rch:  make(chan []byte), wch: make(chan []byte),
 		rdl: newDeadline(), wdl: newDeadline(),
 	}
 	go s.writeLoop(pw)
@@ -335,19 +335,19 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 				err = serr
 			}
 		}
-		var entries [][]byte
+		var data []byte
 		if err == nil {
-			entries, err = decodeHunks(msg)
+			data, err = decodeHunks(msg)
 		}
 		if err != nil {
 			s.rerr = err
 			return
 		}
-		if len(entries) == 0 {
+		if len(data) == 0 {
 			continue
 		}
 		select {
-		case s.rch <- entries:
+		case s.rch <- data:
 		case <-s.done:
 			s.rerr = net.ErrClosed
 			return
@@ -411,9 +411,9 @@ type streamConn struct {
 	done    chan struct{} // closed by Close
 	once    sync.Once
 
-	rch     chan [][]byte // from readLoop; closed on end of stream
-	rerr    error         // set by readLoop before closing rch
-	pending [][]byte      // received entries not yet returned by Read
+	rch     chan []byte // from readLoop; closed on end of stream
+	rerr    error       // set by readLoop before closing rch
+	pending []byte      // received data not yet returned by Read
 
 	wch      chan []byte // to writeLoop
 	werr     atomic.Pointer[error]
@@ -441,9 +441,9 @@ func (s *streamConn) Read(p []byte) (int, error) {
 			return 0, net.ErrClosed
 		}
 	}
-	n := copy(p, s.pending[0])
-	if s.pending[0] = s.pending[0][n:]; len(s.pending[0]) == 0 {
-		s.pending = s.pending[1:]
+	n := copy(p, s.pending)
+	if s.pending = s.pending[n:]; len(s.pending) == 0 {
+		s.pending = nil // release the message buffer
 	}
 	return n, nil
 }
@@ -622,10 +622,13 @@ func readMessage(r io.Reader) ([]byte, error) {
 // allocates) at a time.
 const readStep = 32 << 10
 
-// decodeHunks returns the non-empty field-1 entries of a Hunk or MultiHunk
-// in order, skipping unknown fields (protobuf wire format).
-func decodeHunks(b []byte) ([][]byte, error) {
-	var out [][]byte
+// decodeHunks returns the field-1 entries of a Hunk or MultiHunk joined in
+// order, skipping unknown fields (protobuf wire format). The entries are
+// moved together inside b and the result aliases it: a slice per entry would
+// let a server turn one message of 1-byte entries into 8 times its size in
+// slice headers.
+func decodeHunks(b []byte) ([]byte, error) {
+	out := b[:0]
 	for len(b) > 0 {
 		tag, n := binary.Uvarint(b)
 		if n <= 0 {
@@ -650,8 +653,8 @@ func decodeHunks(b []byte) ([][]byte, error) {
 			}
 			v := b[n : n+int(l)]
 			b = b[n+int(l):]
-			if tag>>3 == 1 && len(v) > 0 {
-				out = append(out, v)
+			if tag>>3 == 1 {
+				out = append(out, v...) // never ahead of the read position
 			}
 		case 5: // 32-bit
 			if len(b) < 4 {

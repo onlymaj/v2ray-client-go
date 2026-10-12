@@ -257,6 +257,12 @@ func ParseVLESS(link string) (Client, error) {
 		return Client{}, err
 	}
 	switch c.Network {
+	case "tcp":
+		// HTTP header obfuscation is not implemented (the VMess parser
+		// refuses it too).
+		if t := q.Get("headerType"); t != "" && t != "none" {
+			return Client{}, fmt.Errorf("vless: tcp header %q not supported", t)
+		}
 	case "ws":
 		c.Path, c.Host = q.Get("path"), q.Get("host")
 	case "grpc":

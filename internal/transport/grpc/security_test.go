@@ -201,3 +201,17 @@ func TestLargeResponseHeadersRefused(t *testing.T) {
 		t.Fatal("stream with 256 KiB of response headers was accepted")
 	}
 }
+
+// Round 10: decodeHunks returned one slice per entry, so a server could send
+// a 1 MiB message of 1-byte entries and make the client allocate 41 MB while
+// decoding it and pin 8 MB of slice headers until the data was read out.
+func TestDecodeHunksNoPerEntryMemory(t *testing.T) {
+	msg := bytes.Repeat([]byte{0x0A, 1, 'x'}, maxMessage/3)
+	got, err := decodeHunks(msg) // compacts msg in place
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != maxMessage/3 || &got[0] != &msg[0] {
+		t.Fatalf("got %d bytes, want %d inside the message buffer", len(got), maxMessage/3)
+	}
+}

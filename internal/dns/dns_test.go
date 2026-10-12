@@ -313,7 +313,7 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 				defer f.wg.Done()
 				defer c.Close()
 				for {
-					q, err := readMsg(c)
+					q, err := readMsg(c, 0xffff)
 					if err != nil {
 						return
 					}
@@ -452,7 +452,7 @@ func TestEndToEnd(t *testing.T) {
 		if err := writeMsg(c, big); err != nil {
 			t.Fatal(err)
 		}
-		r, err = readMsg(c)
+		r, err = readMsg(c, 0xffff)
 		if err != nil {
 			t.Fatal(err)
 		}
