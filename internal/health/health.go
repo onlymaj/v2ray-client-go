@@ -7,8 +7,10 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -466,7 +468,7 @@ func probe(ctx context.Context, p Prober, u *probeURL) (time.Duration, error) {
 	stop := context.AfterFunc(ctx, func() { conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
 	if u.tls {
-		tc := tls.Client(conn, &tls.Config{ServerName: u.host})
+		tc := tls.Client(conn, probeTLS(u.host, time.Now()))
 		if err := tc.HandshakeContext(ctx); err != nil {
 			return 0, err
 		}
@@ -484,6 +486,43 @@ func probe(ctx context.Context, p Prober, u *probeURL) (time.Duration, error) {
 		return 0, fmt.Errorf("health: unexpected HTTP status %d", code)
 	}
 	return d, nil
+}
+
+// clockFloor is a date before this code was written. A clock that shows an
+// earlier one has not been set: the router has no battery clock and starts
+// in the past after a power cut.
+var clockFloor = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+var staleClockLog sync.Once
+
+// probeTLS is the TLS config of a probe at time now. With an unset clock
+// the probe's certificate, weeks old, is "not yet valid": every client was
+// marked down, the kill switch applied, and where the router resolves the
+// NTP server's name through the container it could never set the clock
+// (round 25). The chain and the name are then still checked, at a time
+// within the certificate's validity.
+func probeTLS(host string, now time.Time) *tls.Config {
+	cfg := &tls.Config{ServerName: host}
+	if !now.Before(clockFloor) {
+		return cfg
+	}
+	staleClockLog.Do(func() {
+		log.Printf("health: the clock shows %s and is not set; probe certificates are checked without their dates until it is", now.UTC().Format("2006-01-02"))
+	})
+	cfg.InsecureSkipVerify = true // VerifyConnection does it, at another time
+	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		if len(cs.PeerCertificates) == 0 {
+			return errors.New("health: no server certificate")
+		}
+		leaf := cs.PeerCertificates[0]
+		opts := x509.VerifyOptions{DNSName: host, Roots: cfg.RootCAs, Intermediates: x509.NewCertPool(), CurrentTime: leaf.NotBefore.Add(time.Hour)}
+		for _, c := range cs.PeerCertificates[1:] {
+			opts.Intermediates.AddCert(c)
+		}
+		_, err := leaf.Verify(opts)
+		return err
+	}
+	return cfg
 }
 
 // readStatus parses an HTTP/1.x status line and returns the code.

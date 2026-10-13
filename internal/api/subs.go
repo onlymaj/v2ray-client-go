@@ -53,6 +53,14 @@ func (s *server) createSub(w http.ResponseWriter, r *http.Request) {
 		sub.Name = u.Hostname()
 	}
 	if err := s.update(func(cfg *config.Config) error {
+		// The reply to this request can be an error although the
+		// subscription was stored (the first fetch is a second save); a
+		// retry then made a duplicate (round 25).
+		for _, o := range cfg.Subscriptions {
+			if o.URL == sub.URL {
+				return errf(http.StatusConflict, "a subscription with this URL already exists")
+			}
+		}
 		cfg.Subscriptions = append(cfg.Subscriptions, sub)
 		return nil
 	}); err != nil {

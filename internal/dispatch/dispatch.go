@@ -171,6 +171,7 @@ func (d *Dispatcher) update(cfg *config.Config) error {
 			for _, id := range g.Members {
 				d.feed(ns, e.sel, id)
 			}
+			e.sel.Settle()
 		}
 		ns.groups[g.ID] = e
 	}

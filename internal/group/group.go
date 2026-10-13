@@ -115,6 +115,24 @@ func (s *Selector) Forget(id string) {
 	}
 }
 
+// Settle is called once a new Selector has been fed its members' last
+// results. They come in list order, so a least-ping group took the first
+// member that was up, not the fastest, until the fastest was checked again
+// (round 25).
+func (s *Selector) Settle() {
+	s.mu.Lock()
+	from := s.cur
+	if s.g.Strategy == LeastPing {
+		s.cur = s.fastestUp()
+		s.resetBetter()
+	}
+	to := s.cur
+	s.mu.Unlock()
+	if from != to && s.onChange != nil {
+		s.onChange(s.name(from), s.name(to))
+	}
+}
+
 // Update records a health-check result for a member. Unknown IDs are ignored.
 func (s *Selector) Update(id string, up bool, delay time.Duration) {
 	s.mu.Lock()

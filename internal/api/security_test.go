@@ -908,3 +908,17 @@ func TestFetchIsHTTP1Only(t *testing.T) {
 		t.Fatalf("ForceAttemptHTTP2 %v, TLSNextProto %v; want HTTP/2 off", tr.ForceAttemptHTTP2, tr.TLSNextProto)
 	}
 }
+
+// Round 25: adding a subscription stores it and then fetches it in a
+// second save; when that failed the reply was an error although the
+// subscription existed, and a retry made a duplicate.
+func TestSubscriptionURLIsUnique(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	e.setSub("http://sub.example/one", manyLinks(t, 2))
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/one"}, 201, nil)
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/one"}, 409, nil)
+	if n := len(e.store.Get().Subscriptions); n != 1 {
+		t.Fatalf("%d subscriptions, want 1", n)
+	}
+}

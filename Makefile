@@ -14,7 +14,7 @@ XRAY_SHA := 23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae
 UPX      := .tools/upx
 XRAY     := .tools/xray
 
-GOBUILD := CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w -buildid="
+GOBUILD := CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid="
 
 .PHONY: build build-ui embed-ui test interop image size probe probe-image clean
 

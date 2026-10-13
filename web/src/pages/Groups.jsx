@@ -155,6 +155,7 @@ export function Groups() {
                       <span className="w-4 shrink-0 text-xs text-muted-foreground">{i + 1}</span>
                       <StatusDot state={c?.enabled ? c.status.state : 'disabled'} />
                       <span className="min-w-0 flex-1 truncate">{c?.name || id}</span>
+                      {c?.untrusted && <Badge variant="outline" title="From a subscription or an imported link; its name is the provider's choice">untrusted</Badge>}
                       <span className="text-xs text-muted-foreground tabular-nums">{c?.status.state === 'up' ? fmtMs(c.status.delayMs) : c?.status.state}</span>
                     </li>
                   );

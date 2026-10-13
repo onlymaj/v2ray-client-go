@@ -97,7 +97,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 | Method | Path | Body | Response |
 |---|---|---|---|
 | GET | `/api/subscriptions` | — | `[Subscription]` |
-| POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. |
+| POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. `409` if a subscription with this URL exists. |
 | DELETE | `/api/subscriptions/:id` | — | `204`. The server also deletes the clients that came from this subscription, with the same cleanup as `DELETE /api/clients/:id`. |
 | POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. The same goes for a subscription whose clients do not fit the config (over the limit of 250 clients, for one): nothing changes and `lastError` says why. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
 
@@ -135,7 +135,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 ```jsonc
 {
   "ports": { "transparent": 12345, "socks": 1080, "http": 8118, "dns": 5353, "ui": 8080 },  // 1-65535; socks/http/dns accept 0 = disabled
-  "healthUrl": "https://www.gstatic.com/generate_204",
+  "healthUrl": "https://www.gstatic.com/generate_204",   // keep it https: with http the proxy server itself can answer the probe and fake its delay
   "healthInterval": 30,          // seconds, 5-3600
   "killSwitch": "block",         // "block" | "direct" (a group with no working member and an enabled member not checked yet always blocks; a rule that targets one client does not look at its health: while the client is enabled its connections are dialed and fail, and when it is disabled the kill switch applies at once)
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client; not a loopback, unspecified or multicast address

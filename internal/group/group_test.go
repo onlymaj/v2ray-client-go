@@ -216,3 +216,23 @@ func TestConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// Round 25: a group whose member list changed gets a new selector, fed its
+// members' last results in list order. Least-ping then took the first
+// member that was up, not the fastest, until the fastest was checked again.
+func TestSettlePicksTheFastest(t *testing.T) {
+	var c changes
+	s := newSel(t, LeastPing, &c, "slow", "fast")
+	s.Update("slow", true, 300*ms)
+	s.Update("fast", true, 50*ms)
+	wantCur(t, s, "slow")
+	s.Settle()
+	wantCur(t, s, "fast")
+
+	// Failover keeps its order.
+	f := newSel(t, Failover, &c, "first", "second")
+	f.Update("first", true, 300*ms)
+	f.Update("second", true, 50*ms)
+	f.Settle()
+	wantCur(t, f, "first")
+}
