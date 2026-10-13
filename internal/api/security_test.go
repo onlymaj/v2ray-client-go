@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -834,4 +835,27 @@ func TestImportBodyCap(t *testing.T) {
 	e := newEnv(t)
 	e.login()
 	e.expect("POST", "/api/import", map[string]string{"text": strings.Repeat("# not a link\n", maxBody/13+1)}, 413, nil)
+}
+
+// Round 20: a subscription host whose name resolves only to the container,
+// its gateway, loopback or a link-local address was fetched like one the
+// admin hosts on the LAN. The gateway is the router, whose REST service
+// trusts requests from the container.
+func TestFetchRefusesSelfAndGateway(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte("router"))
+	}))
+	defer srv.Close()
+	_, port, _ := strings.Cut(strings.TrimPrefix(srv.URL, "http://"), ":")
+	oldL, oldR := fetchLookup, fetchRefused
+	fetchLookup = func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	}
+	fetchRefused = func(ip netip.Addr) bool { return ip.IsLoopback() } // as netguard.Refused does
+	defer func() { fetchLookup, fetchRefused = oldL, oldR }()
+	if _, err := defaultFetch(context.Background(), "http://sub.example:"+port+"/"); !errors.Is(err, errRedirectBlocked) || hits.Load() != 0 {
+		t.Fatalf("err %v, %d requests reached the server", err, hits.Load())
+	}
 }

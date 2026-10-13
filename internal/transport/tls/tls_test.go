@@ -168,3 +168,114 @@ func TestRandomFingerprintStablePerLayer(t *testing.T) {
 		t.Fatalf("random always picked %v", seen)
 	}
 }
+
+// wrapWith dials a server that presents cert and, after the handshake,
+// writes n bytes through TLS.
+func wrapWith(t *testing.T, cert gotls.Certificate, n int) (net.Conn, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		s := gotls.Server(c, &gotls.Config{Certificates: []gotls.Certificate{cert}})
+		if s.Handshake() != nil {
+			return
+		}
+		s.Write(make([]byte, n))
+		io.Copy(io.Discard, c)
+	}()
+	f, _ := transport.Lookup("tls")
+	l, err := f([]byte(`{"serverName":"example.test","allowInsecure":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return l.Wrap(context.Background(), raw)
+}
+
+// Round 20: uTLS takes a certificate message of 256 KiB and keeps every
+// certificate in it for the life of the connection, 350 KiB per connection
+// from a server that pads its chain. The handshake has a byte budget.
+func TestPaddedCertificateChainRefused(t *testing.T) {
+	cert := selfSigned(t)
+	for len(cert.Certificate)*len(cert.Certificate[0]) < 200<<10 {
+		cert.Certificate = append(cert.Certificate, cert.Certificate[0])
+	}
+	if _, err := wrapWith(t, cert, 0); err == nil {
+		t.Fatal("handshake with a 200 KiB certificate chain succeeded")
+	}
+	// A chain of an ordinary size, and plenty of data after it: the
+	// budget for bytes without plaintext starts again with every delivery.
+	c, err := wrapWith(t, selfSigned(t), 20*MaxQuietIn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := io.CopyN(io.Discard, c, 20*MaxQuietIn); err != nil {
+		t.Fatalf("read %d of %d bytes: %v", n, 20*MaxQuietIn, err)
+	}
+}
+
+type recordSource struct{ left int }
+
+// Read yields TLS records of 1000 body bytes, for ever.
+func (r *recordSource) Read(p []byte) (int, error) {
+	rec := append([]byte{22, 3, 3, 1000 >> 8, 1000 & 0xff}, make([]byte, 1000)...)
+	n := 0
+	for n+len(rec) <= len(p) {
+		n += copy(p[n:], rec)
+	}
+	return n, nil
+}
+
+type readerConn struct {
+	net.Conn
+	r io.Reader
+}
+
+func (c readerConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+
+// Round 20: after the handshake uTLS collects a handshake message of up to
+// 64 KiB (in a buffer of 128 KiB) without delivering anything or failing,
+// so a server could park that in every connection. Bytes handed to uTLS
+// without plaintext coming back are bounded.
+func TestBytesWithoutPlaintextAreBounded(t *testing.T) {
+	rc := NewRecordConn(readerConn{r: &recordSource{}})
+	rc.SetLimit(MaxQuietIn)
+	buf := make([]byte, 4096)
+	total := 0
+	for {
+		n, err := rc.Read(buf)
+		total += n
+		if err != nil {
+			break
+		}
+		if total > 2*MaxQuietIn {
+			t.Fatalf("%d bytes handed on without any plaintext", total)
+		}
+	}
+	if total > MaxQuietIn {
+		t.Fatalf("stopped after %d bytes, limit %d", total, MaxQuietIn)
+	}
+	// With plaintext delivered in between, it goes on.
+	rc = NewRecordConn(readerConn{r: &recordSource{}})
+	rc.SetLimit(MaxQuietIn)
+	for total = 0; total < 4*MaxQuietIn; {
+		n, err := rc.Read(buf)
+		if err != nil {
+			t.Fatalf("after %d bytes with progress: %v", total, err)
+		}
+		total += n
+		rc.Progress()
+	}
+}

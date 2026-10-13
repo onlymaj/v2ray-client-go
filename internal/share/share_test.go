@@ -3,6 +3,7 @@ package share
 import (
 	"encoding/base64"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -173,6 +174,27 @@ func TestDecodeSubscriptionJunkIsCounted(t *testing.T) {
 	for _, in := range []string{"<html>not found</html>", "bm90IGEgbGluaw=="} {
 		if r := DecodeSubscription([]byte(in)); len(r.Clients) != 0 || r.Skipped != 1 {
 			t.Errorf("%q: %+v", in, r)
+		}
+	}
+}
+
+// Round 20: one link of 2 MiB whose alpn was all commas became a 32 MiB
+// list before the empty items were dropped, and an oversized field quoted
+// in an error message cost more still. A link has a length limit.
+func TestOversizedLinkCostsLittle(t *testing.T) {
+	for name, body := range map[string]string{
+		"alpn of commas": "vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.example:443?security=tls&alpn=" + strings.Repeat(",", 2<<20) + "#x",
+		"long field":     "vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.example:443?type=" + strings.Repeat("\x7f", 1<<20) + "#x",
+	} {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		r := DecodeSubscription([]byte(body))
+		runtime.ReadMemStats(&after)
+		if len(r.Clients) != 0 || len(r.Errors) != 1 || !strings.Contains(r.Errors[0].Err, "longer than") {
+			t.Errorf("%s: %d clients, errors %+v", name, len(r.Clients), r.Errors)
+		}
+		if d := after.TotalAlloc - before.TotalAlloc; d > 6<<20 {
+			t.Errorf("%s: %d MiB allocated for a %d MiB body", name, d>>20, len(body)>>20)
 		}
 	}
 }

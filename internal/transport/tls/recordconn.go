@@ -1,6 +1,7 @@
 package tls
 
 import (
+	"errors"
 	"net"
 	"sync/atomic"
 )
@@ -26,7 +27,39 @@ type RecordConn struct {
 	hdrLeft int // header bytes still to hand out (0 while inside a body)
 	body    int // body bytes still to hand out
 	raw     atomic.Bool
+
+	// limit bounds the bytes handed to uTLS since the last Progress (or
+	// SetLimit); 0 is no limit. See MaxHandshakeIn and MaxQuietIn.
+	limit, passed atomic.Int64
 }
+
+// What uTLS may take in without giving anything back (round 20). uTLS has
+// limits of its own, but they are sized for a desktop: a 256 KiB
+// certificate message, whose certificates it then keeps for the life of
+// the connection (350 KiB measured), and after the handshake a 64 KiB
+// handshake message collected in a buffer of twice that, with nothing
+// delivered and no error. A proxy server could park that in every one of
+// the 512 connections.
+const (
+	// MaxHandshakeIn is for the whole handshake. A server's flight is 3 to
+	// 12 KiB; the largest certificate chains in use are below 30 KiB.
+	MaxHandshakeIn = 64 << 10
+	// MaxQuietIn is for the bytes between two deliveries of plaintext: one
+	// full record (16 KiB + 261) and the session tickets or key updates
+	// that may come before it.
+	MaxQuietIn = 24 << 10
+)
+
+var errQuiet = errors.New("tls: too many bytes from the server without data")
+
+// SetLimit starts a new count with limit n.
+func (c *RecordConn) SetLimit(n int) {
+	c.passed.Store(0)
+	c.limit.Store(int64(n))
+}
+
+// Progress is called when uTLS has delivered plaintext.
+func (c *RecordConn) Progress() { c.passed.Store(0) }
 
 func NewRecordConn(c net.Conn) *RecordConn {
 	return &RecordConn{Conn: c, buf: make([]byte, 8192), hdrLeft: 5}
@@ -58,6 +91,9 @@ func (c *RecordConn) Read(p []byte) (int, error) {
 		}
 		if n > limit {
 			n = limit
+		}
+		if l := c.limit.Load(); l > 0 && c.passed.Add(int64(n)) > l {
+			return 0, errQuiet
 		}
 		c.track(c.buf[c.r : c.r+n])
 	}

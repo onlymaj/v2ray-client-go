@@ -113,6 +113,12 @@ func (s *Settings) repair() []string {
 			s.Ports = def.Ports
 		case strings.HasPrefix(msg, "dnsUpstream"):
 			s.DNSUpstream = def.DNSUpstream
+		case strings.HasPrefix(msg, "routeros url must be https"):
+			// The URL is the documented plain-HTTP setup; the pin is the
+			// part that does nothing there (round 20).
+			s.RouterOS.Enabled, s.RouterOS.CertSHA256 = false, ""
+			fixed = append(fixed, msg+"; the RouterOS sync is turned off and certSha256 is cleared")
+			continue
 		case strings.HasPrefix(msg, "routeros url"):
 			// The password goes with the URL it was entered for.
 			s.RouterOS.Enabled, s.RouterOS.URL, s.RouterOS.Password = false, def.RouterOS.URL, ""
@@ -153,6 +159,10 @@ func (s *Settings) validate() error {
 	}
 	if ap, err := netip.ParseAddrPort(s.DNSUpstream); err != nil || ap.Port() == 0 {
 		return errors.New("dnsUpstream must be ip:port")
+	} else if a := ap.Addr().Unmap(); a.IsLoopback() || a.IsUnspecified() || a.IsMulticast() {
+		// Queries sent to itself would come back in until every upstream
+		// slot was taken (round 20).
+		return errors.New("dnsUpstream must not be a loopback, unspecified or multicast address")
 	}
 	// An empty URL is allowed: ROS_URL can supply it.
 	if r := s.RouterOS; r.URL != "" {

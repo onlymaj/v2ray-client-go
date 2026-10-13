@@ -95,10 +95,11 @@ func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 			return nil, err
 		}
 	}
+	rec.SetLimit(MaxHandshakeIn)
 	if err := u.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}
-	return &Conn{UConn: u, rec: rec}, nil
+	return NewConn(u, rec), nil
 }
 
 // setALPN builds the fingerprint's hello, rewrites (or appends) its ALPN
@@ -131,7 +132,19 @@ type Conn struct {
 	rec *RecordConn
 }
 
-func NewConn(u *utls.UConn, rec *RecordConn) *Conn { return &Conn{UConn: u, rec: rec} }
+// NewConn is called once the handshake is done.
+func NewConn(u *utls.UConn, rec *RecordConn) *Conn {
+	rec.SetLimit(MaxQuietIn)
+	return &Conn{UConn: u, rec: rec}
+}
+
+func (c *Conn) Read(p []byte) (int, error) {
+	n, err := c.UConn.Read(p)
+	if n > 0 {
+		c.rec.Progress()
+	}
+	return n, err
+}
 
 func (c *Conn) NegotiatedProtocol() string { return c.ConnectionState().NegotiatedProtocol }
 

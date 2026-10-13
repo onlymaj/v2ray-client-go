@@ -200,9 +200,12 @@ func (s *Syncer) Run(ctx context.Context) {
 			}
 			key := fmt.Sprint(cfg, desired, !hold)
 			if key != appliedKey || !now.Before(nextSync) {
-				n, err := s.reconcile(ctx, client, cfg.list, desired, !hold)
+				n, err := s.reconcile(ctx, client, cfg.list, desired, !hold, cfg)
 				if ctx.Err() != nil {
 					return
+				}
+				if errors.Is(err, errSettingsChanged) {
+					continue // SetConfig has woken the loop; start over
 				}
 				syncErr = err
 				if err != nil {
@@ -402,7 +405,17 @@ func normAddr(a string) string {
 // reconcile makes the owned entries of list equal desired and returns the
 // number of owned entries afterwards. With remove false (some hostname
 // failed to resolve, e.g. DNS not up yet at boot) it only adds.
-func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired []string, remove bool) (int, error) {
+// base is the config the pass was started with; without it, the current one.
+func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired []string, remove bool, base ...config) (int, error) {
+	s.mu.Lock()
+	cfg := s.cfg
+	s.mu.Unlock()
+	if len(base) > 0 {
+		// Not the config as it is after List: the names were resolved
+		// and the list read with the old one, which can take minutes, and
+		// a change in that time went unnoticed (round 20).
+		cfg = base[0]
+	}
 	entries, err := c.List(ctx, list)
 	if err != nil {
 		return 0, err
@@ -444,10 +457,7 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 	// A router that stopped answering ends the pass: 2048 writes of 10 s
 	// each would keep it (and the old URL and password, after a settings
 	// change) going for hours (round 18). The next pass starts over.
-	s.mu.Lock()
-	cfg := s.cfg
-	s.mu.Unlock()
-	lost := 0
+	lost, changed := 0, false
 	giveUp := func(err error) bool {
 		// Anything but a refusal: no connection, no reply, or a reply
 		// that stalls after its headers (round 19).
@@ -456,7 +466,7 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 			lost++
 		}
 		s.mu.Lock()
-		changed := s.cfg != cfg // not the server list: every save sets it
+		changed = s.cfg != cfg // not the server list: every save sets it
 		s.mu.Unlock()
 		return lost >= maxLost || changed || ctx.Err() != nil
 	}
@@ -470,7 +480,7 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 		}
 		if giveUp(err) {
 			owned += len(stale) - i - 1
-			return owned, passEnded(errs)
+			return owned, passEnded(errs, changed)
 		}
 	}
 	for _, a := range desired {
@@ -484,7 +494,7 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 			} else {
 				owned++
 			}
-			return owned, passEnded(errs)
+			return owned, passEnded(errs, changed)
 		}
 		if err != nil {
 			errs = append(errs, err)
@@ -502,11 +512,15 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 // maxLost is how many requests of one pass may fail without a reply.
 const maxLost = 3
 
-func passEnded(errs []error) error {
-	if err := firstErrs(errs); err != nil {
-		return fmt.Errorf("pass ended early: %w", err)
+// errSettingsChanged ends a pass that is no longer wanted. It is not a
+// failure: the next pass starts at once with the new settings.
+var errSettingsChanged = errors.New("pass ended early: the settings changed")
+
+func passEnded(errs []error, changed bool) error {
+	if changed {
+		return errSettingsChanged
 	}
-	return errors.New("pass ended early: the settings changed")
+	return fmt.Errorf("pass ended early: %w", firstErrs(errs))
 }
 
 // maxErrsShown is how many errors of one pass are reported.

@@ -64,7 +64,7 @@ The mock accepts the password `admin`.
 }
 ```
 
-`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (2 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
+A share link is at most 16 KiB; a longer line of an import or a subscription is reported as an error for that line. `name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (2 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -138,7 +138,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
   "healthUrl": "https://www.gstatic.com/generate_204",
   "healthInterval": 30,          // seconds, 5-3600
   "killSwitch": "block",         // "block" | "direct" (a group with no working member and an enabled member not checked yet always blocks)
-  "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client
+  "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client; not a loopback, unspecified or multicast address
   "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",
                 "password": "", "passwordSet": true, "addressList": "no-proxy",

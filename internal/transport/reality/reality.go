@@ -127,10 +127,12 @@ func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	rec.SetLimit(ntls.MaxHandshakeIn)
 	if err := u.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}
 	if !verified {
+		rec.SetLimit(0) // the spider reads pages; it has its own bound
 		// A real certificate: we reached the camouflage site, not an Xray
 		// server (MITM or redirection). Behave like a browser, then fail.
 		// At most two at a time: every failed dial would otherwise start

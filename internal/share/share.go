@@ -59,6 +59,12 @@ var ErrUnsupportedScheme = errors.New("unsupported link scheme")
 // Parse parses a single vless:// or vmess:// link.
 func Parse(link string) (Client, error) {
 	link = strings.TrimSpace(link)
+	// Before anything is split, decoded or quoted into an error: one link
+	// of 2 MiB with an alpn of commas became 32 MiB of list entries, and
+	// an oversized field quoted in an error 47 MiB (round 20).
+	if len(link) > MaxLinkLen {
+		return Client{}, fmt.Errorf("link is longer than %d bytes", MaxLinkLen)
+	}
 	scheme, _, ok := strings.Cut(link, "://")
 	if !ok {
 		return Client{}, errors.New("not a share link")
@@ -484,6 +490,10 @@ type Result struct {
 
 // MaxLinks bounds the links ParseBulk and DecodeSubscription accept.
 const MaxLinks = 1000
+
+// MaxLinkLen bounds one share link. The fields of a client are limited to
+// about 1 KiB each, so a real link is far below this.
+const MaxLinkLen = 16 << 10
 
 // maxErrorText bounds LineError.Text.
 const maxErrorText = 256

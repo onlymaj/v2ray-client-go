@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,7 +22,10 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/share"
 )
 
-func init() { scryptN = 1024 } // keep tests fast
+func init() {
+	scryptN = 1024                                                        // keep tests fast
+	fetchRefused = func(ip netip.Addr) bool { return ip.IsUnspecified() } // the test servers are on loopback
+}
 
 type fakeRT struct {
 	mu      sync.Mutex

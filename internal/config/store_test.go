@@ -172,8 +172,9 @@ func TestOpenRepairsRouterOSSettings(t *testing.T) {
 		url, pass   string
 		wantInFixed string
 	}{
-		"no list":   {`{"enabled":true,"url":"https://192.168.88.1","password":"p","addressList":""}`, "https://192.168.88.1", "p", "sync is turned off"},
-		"no scheme": {`{"enabled":true,"url":"192.168.88.1","password":"p","addressList":"x"}`, Default().Settings.RouterOS.URL, "", "password are reset"},
+		"no list":       {`{"enabled":true,"url":"https://192.168.88.1","password":"p","addressList":""}`, "https://192.168.88.1", "p", "sync is turned off"},
+		"pin over http": {`{"enabled":true,"url":"http://172.17.0.1","password":"p","addressList":"x","certSha256":"` + strings.Repeat("ab", 32) + `"}`, "http://172.17.0.1", "p", "certSha256 is cleared"},
+		"no scheme":     {`{"enabled":true,"url":"192.168.88.1","password":"p","addressList":"x"}`, Default().Settings.RouterOS.URL, "", "password are reset"},
 	} {
 		c := Default()
 		if err := json.Unmarshal([]byte(`{"settings":{"routeros":`+tc.ros+`}}`), c); err != nil {
@@ -195,7 +196,7 @@ func TestOpenRepairsRouterOSSettings(t *testing.T) {
 func TestOpenRemovesLeftoverTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	left := filepath.Join(dir, ".config-123456.json")
-	other := filepath.Join(dir, "notes.json")
+	other := filepath.Join(dir, ".config-backup.json") // round 20: the admin's own
 	for _, f := range []string{left, other} {
 		if err := os.WriteFile(f, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)

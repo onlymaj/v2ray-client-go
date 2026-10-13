@@ -257,30 +257,55 @@ func relay(client, server net.Conn, t Tracked, clientSent bool) {
 	<-done
 }
 
+// idleBuf is the buffer a relay direction waits with. The 16 KiB pooled one
+// is taken only while reads fill it: held across the blocking Read, the two
+// of them were 32 KiB of every idle connection, and 512 idle connections
+// over TLS did not fit in the memory limit (round 20).
+const idleBuf = 2048
+
 func copyHalf(dst, src net.Conn, w *watch, add func(int64)) {
-	bp := bufPool.Get().(*[]byte)
-	defer bufPool.Put(bp)
-	buf := *bp
-	for {
-		n, err := src.Read(buf)
-		if n > 0 {
+	// pass handles one Read result and reports whether the copy is over.
+	pass := func(b []byte, err error) bool {
+		if len(b) > 0 {
 			w.touch()
-			if _, werr := dst.Write(buf[:n]); werr != nil {
+			if _, werr := dst.Write(b); werr != nil {
 				w.abort()
-				return
+				return true
 			}
-			add(int64(n))
+			add(int64(len(b)))
 		}
-		if err != nil {
-			if err != io.EOF {
-				w.abort()
-				return
-			}
-			if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-				cw.CloseWrite()
-			}
-			w.half()
+		if err == nil {
+			return false
+		}
+		if err != io.EOF {
+			w.abort()
+			return true
+		}
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			cw.CloseWrite()
+		}
+		w.half()
+		return true
+	}
+	small := make([]byte, idleBuf)
+	for {
+		n, err := src.Read(small)
+		if pass(small[:n], err) {
 			return
 		}
+		if n < len(small) {
+			continue
+		}
+		// Data is flowing: the large buffer, until a read comes back
+		// with less than the small one would have held.
+		bp := bufPool.Get().(*[]byte)
+		for n >= len(small) {
+			n, err = src.Read(*bp)
+			if pass((*bp)[:n], err) {
+				bufPool.Put(bp)
+				return
+			}
+		}
+		bufPool.Put(bp)
 	}
 }

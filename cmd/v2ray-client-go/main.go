@@ -171,13 +171,17 @@ func run() error {
 		}
 		// The same checks the settings get, on what is used: ROS_URL is
 		// not in the settings (round 19).
-		if msg := rosProblem(rosURL, r.AddressList, r.CertSHA256); rosEnabled && msg != "" {
+		msg := ""
+		if rosEnabled {
+			msg = rosProblem(rosURL, r.AddressList, r.CertSHA256, envOr("ROS_PASS", r.Password))
+		}
+		if msg != "" {
 			rosEnabled = false
 			if msg != rosWarned {
 				log.Printf("routeros: %s; sync disabled", msg)
 			}
-			rosWarned = msg
 		}
+		rosWarned = msg // logged again when it comes back
 		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList, r.CertSHA256)
 		ros.SetServers(servers)
 
@@ -443,7 +447,7 @@ func (c *capConn) Close() error {
 }
 
 // rosProblem reports why the RouterOS sync cannot run with these values.
-func rosProblem(rawURL, list, pin string) string {
+func rosProblem(rawURL, list, pin, pass string) string {
 	u, err := url.Parse(rawURL)
 	switch {
 	case err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "":
@@ -452,6 +456,8 @@ func rosProblem(rawURL, list, pin string) string {
 		return "certSha256 is set but the URL is http, where no certificate is checked and the password is sent in clear text"
 	case list == "":
 		return "the address list name is empty"
+	case pass == "another-long-random":
+		return "the password is the example from docs/routeros.md; set one of your own on the router and here"
 	}
 	return ""
 }

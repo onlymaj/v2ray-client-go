@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -32,9 +33,18 @@ func Open(path string) (*Store, error) {
 	s := &Store{path: path}
 	// What a save that was cut short (power loss) left behind; each can be
 	// as large as the config, on a small flash (round 19).
-	if old, _ := filepath.Glob(filepath.Join(filepath.Dir(path), tmpPattern)); len(old) > 0 {
-		for _, f := range old {
-			os.Remove(f)
+	// Only names os.CreateTemp makes from tmpPattern (digits in place of
+	// the star): the directory is the admin's mount and may hold a
+	// ".config-backup.json" of theirs (round 20).
+	dir := filepath.Dir(path)
+	if ents, err := os.ReadDir(dir); err == nil {
+		pre, suf, _ := strings.Cut(tmpPattern, "*")
+		for _, e := range ents {
+			mid, ok := strings.CutPrefix(e.Name(), pre)
+			mid, ok2 := strings.CutSuffix(mid, suf)
+			if ok && ok2 && mid != "" && strings.Trim(mid, "0123456789") == "" && e.Type().IsRegular() {
+				os.Remove(filepath.Join(dir, e.Name()))
+			}
 		}
 	}
 	data, err := os.ReadFile(path)

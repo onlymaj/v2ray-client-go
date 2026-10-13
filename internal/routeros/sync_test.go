@@ -612,15 +612,46 @@ func TestSavingTheConfigDoesNotEndAPass(t *testing.T) {
 // Round 19: reply headers were limited only by net/http's default of
 // 10 MB, and 2.6 million header lines were 42 MiB while the reply was held.
 func TestReplyHeadersAreBounded(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var proto atomic.Value
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proto.Store(r.Proto)
 		for i := range 4 * maxReplyHeader / 16 {
 			w.Header().Set(fmt.Sprintf("X-Pad-%07d", i), "v")
 		}
 		w.Write([]byte("[]"))
 	}))
+	srv.EnableHTTP2 = true // round 20: the limit is HTTP/1's, so no h2
+	srv.StartTLS()
 	defer srv.Close()
 	c := NewClient(srv.URL, "u", "p", true, "")
 	if _, err := c.List(context.Background(), "no-proxy"); err == nil {
 		t.Fatal("a reply with 64 KiB of headers was accepted")
+	}
+	if p, _ := proto.Load().(string); p != "HTTP/1.1" {
+		t.Fatalf("request sent as %q", p)
+	}
+}
+
+// Round 20: the pass compared the settings with those it found after
+// reading the list, so a change made while the names were resolved or the
+// list was read went unnoticed for the whole pass.
+func TestReconcileEndsWhenSettingsChangedBeforeIt(t *testing.T) {
+	var writes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+	s := New(Options{Logf: func(string, ...any) {}})
+	s.SetConfig(true, srv.URL, "u", "p", "no-proxy", "")
+	s.mu.Lock()
+	base := s.cfg
+	s.mu.Unlock()
+	s.SetConfig(false, srv.URL, "u", "p", "no-proxy", "") // turned off meanwhile
+	_, err := s.reconcile(context.Background(), newClient(srv.URL, "u", "p", srv.Client()), "no-proxy", []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}, true, base)
+	if !errors.Is(err, errSettingsChanged) || writes.Load() > 1 {
+		t.Fatalf("%d writes, err %v", writes.Load(), err)
 	}
 }

@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"github.com/onlymaj/v2ray-client-go/internal/transport"
@@ -374,5 +375,63 @@ func TestDialDirect(t *testing.T) {
 	c.Close()
 	if _, _, err := d.Dial(context.Background(), lan, "", outbound.Addr{Domain: "block.test", Port: 1}); err != ErrBlocked {
 		t.Fatalf("want ErrBlocked, got %v", err)
+	}
+}
+
+type chunkConn struct {
+	net.Conn
+	sizes []int // what each Read is asked to fill
+	data  [][]byte
+}
+
+func (c *chunkConn) Read(p []byte) (int, error) {
+	c.sizes = append(c.sizes, len(p))
+	if len(c.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.data[0])
+	if c.data[0] = c.data[0][n:]; len(c.data[0]) == 0 {
+		c.data = c.data[1:]
+	}
+	return n, nil
+}
+
+// Round 20: each direction of a relay held a 16 KiB buffer while it waited
+// for data, 32 KiB per idle connection. It waits with a small one and
+// takes the large one only while data flows.
+func TestRelayWaitsWithASmallBuffer(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	var got bytes.Buffer
+	done := make(chan struct{})
+	go func() { io.Copy(&got, b); close(done) }()
+	p1, p2 := net.Pipe()
+	defer p1.Close()
+	defer p2.Close()
+	src := &chunkConn{Conn: p1, data: [][]byte{make([]byte, 100), make([]byte, 40000), make([]byte, 100)}}
+	w := newWatch(src, a, true)
+	defer w.stop()
+	total := int64(0)
+	copyHalf(a, src, w, func(n int64) { total += n })
+	a.Close()
+	<-done
+	if total != 40200 || got.Len() != 40200 {
+		t.Fatalf("copied %d, received %d, want 40200", total, got.Len())
+	}
+	// The first read (nothing known yet), the one after a short read, and
+	// the last one (after the flow ended) are the ones that can block.
+	last := len(src.sizes) - 1
+	if src.sizes[0] != idleBuf || src.sizes[1] != idleBuf || src.sizes[last] != idleBuf {
+		t.Fatalf("read sizes %v: the reads that wait must use the small buffer", src.sizes)
+	}
+	big := 0
+	for _, n := range src.sizes {
+		if n > idleBuf {
+			big++
+		}
+	}
+	if big == 0 {
+		t.Fatalf("read sizes %v: the large buffer was never used", src.sizes)
 	}
 }

@@ -111,6 +111,9 @@ add name=v2ray key=ROS_USER value="v2ray"
 add name=v2ray key=ROS_PASS value="another-long-random"
 ```
 
+Replace `another-long-random` with a password of your own, here and in section 9. The app does not start the sync with the example value.
+
+
 Replace both passwords before you paste this. The app refuses to start with `change-me-long-random` as `ADMIN_PASSWORD`, and logs a warning for one shorter than 10 characters. Failed logins are written to the container log with the source address.
 
 | Variable | Required | Meaning |
@@ -348,7 +351,7 @@ If you enable it, give the app a dedicated user with as few rights as RouterOS a
 
 - Do **not** add the `api` policy. It opens the binary API (port 8728) to this user, which REST does not need. If your build has no `rest-api` policy, update RouterOS.
 - `address=172.17.0.2/32` on the user means the credentials work only from the container, even if they leak. Without `address=` on `www-ssl`, enabling it also opens WebFig over HTTPS to the whole LAN.
-- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3 (keep `in-interface=br-containers`). The traffic never leaves the router, but the password crosses the veth in cleartext. Leave `certSha256` empty in this case: the app refuses a pin together with an `http://` URL (in its settings, and at start when the URL comes from `ROS_URL`: the sync is then off and the log says why), because a pin does nothing without TLS. Do not open `www` to the LAN for this purpose.
+- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3 (keep `in-interface=br-containers`). The traffic never leaves the router, but the password crosses the veth in cleartext. Leave `certSha256` empty in this case: the app refuses a pin together with an `http://` URL (in its settings; when the URL comes from `ROS_URL`, the sync is off for as long as a pin is saved, and the log says why), because a pin does nothing without TLS. Do not open `www` to the LAN for this purpose.
 
 ### Pin the certificate (`certSha256`)
 

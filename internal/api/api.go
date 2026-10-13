@@ -28,6 +28,7 @@ import (
 
 	"github.com/onlymaj/v2ray-client-go/internal/config"
 	"github.com/onlymaj/v2ray-client-go/internal/events"
+	"github.com/onlymaj/v2ray-client-go/internal/netguard"
 	"github.com/onlymaj/v2ray-client-go/internal/share"
 )
 
@@ -425,6 +426,12 @@ func fetchClient(origHost string) *http.Client {
 		d := net.Dialer{Timeout: 10 * time.Second}
 		if !same {
 			d.Control = publicOnly
+		} else {
+			// A subscription on the LAN is allowed, but never on the
+			// container itself, its gateway (the router's REST service
+			// trusts this source address), loopback or link-local: a
+			// public-looking name can resolve to any of them (round 20).
+			d.Control = notSelf
 		}
 		var last error
 		for _, a := range addrs {
@@ -487,6 +494,21 @@ func mixed(addrs []netip.Addr) bool {
 }
 
 // publicOnly is a net.Dialer Control hook that refuses blocked addresses.
+// fetchRefused is netguard.Refused; tests, whose servers are on loopback,
+// replace it.
+var fetchRefused = netguard.Refused
+
+func notSelf(network, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return err
+	}
+	if fetchRefused(ap.Addr()) {
+		return fmt.Errorf("%w: %s", errRedirectBlocked, ap.Addr())
+	}
+	return nil
+}
+
 func publicOnly(network, address string, _ syscall.RawConn) error {
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
