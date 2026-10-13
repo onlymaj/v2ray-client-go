@@ -153,6 +153,14 @@ func HTTPHost(b []byte) (string, error) {
 		}
 		return "", ErrNeedMore
 	}
+	// A request to an HTTP proxy (CONNECT, or a full URL as the target)
+	// names the site the proxy is asked for, not the proxy this connection
+	// goes to: taken as the destination it sent the connection to the site
+	// on the proxy's port, and every such connection failed (round 27).
+	// Only a request to an origin server tells where it is going.
+	if f := bytes.Fields(b[:i]); len(f) < 2 || f[0][0] == 'C' || f[1][0] != '/' && string(f[1]) != "*" {
+		return "", ErrNoDomain
+	}
 	rest := b[i+1:]
 	for {
 		i = bytes.IndexByte(rest, '\n')

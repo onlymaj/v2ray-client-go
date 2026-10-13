@@ -84,6 +84,10 @@ func TestHTTPHost(t *testing.T) {
 		{"GET / HTTP/1.1\r\nHost: [2001:db8::1]:80\r\n\r\n", "", ErrNoDomain},
 		{"GET / HTTP/1.1\r\nHost: 10.0.0.1\r\n\r\n", "", ErrNoDomain},
 		{"GET / HTTP/1.0\r\nAccept: */*\r\n\r\n", "", ErrNoDomain},
+		// Round 27: requests to an HTTP proxy name the site, not the proxy.
+		{"CONNECT www.example.org:443 HTTP/1.1\r\nHost: www.example.org:443\r\n\r\n", "", ErrNoDomain},
+		{"GET http://www.example.org/x HTTP/1.1\r\nHost: www.example.org\r\n\r\n", "", ErrNoDomain},
+		{"OPTIONS * HTTP/1.1\r\nHost: example.net\r\n\r\n", "example.net", nil},
 		{"GET / HTTP/1.1\r\nAccept: */*\r\nHo", "", ErrNeedMore},
 		{"GET / HTTP/1.1\r\nHost: example.com", "", ErrNeedMore},
 		{"GET /index", "", ErrNeedMore},
