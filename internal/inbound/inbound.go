@@ -30,7 +30,7 @@ const handshakeTimeout = 10 * time.Second
 // 75 KB while data flows both ways over TLS (two goroutines, two 16 KB copy
 // buffers, 8-16 KB of protocol buffers, about 33 KB of outbound TLS state),
 // measured in round 20, and about 47 KB while idle (the copy buffers are
-// then 2 KB each). 512 idle conns are about 24 MB; 512 busy ones do not fit
+// then 2 KB each, unless the last read was nearly a full large one). 512 idle conns are about 24 MB; 512 busy ones do not fit
 // and lean on the collector. Sources are counted per IPv4 address and
 // per IPv6 /64, so privacy addresses don't multiply the per-source cap.
 //

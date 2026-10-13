@@ -279,3 +279,15 @@ func TestBytesWithoutPlaintextAreBounded(t *testing.T) {
 		rc.Progress()
 	}
 }
+
+// Round 21: nothing checked that a wrapped connection has the limit on; the
+// tests above passed with it switched off in NewConn.
+func TestWrappedConnHasTheQuietLimit(t *testing.T) {
+	c, err := wrapWith(t, selfSigned(t), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := c.(*Conn).rec.limit.Load(); l != MaxQuietIn {
+		t.Fatalf("limit after the handshake is %d, want %d", l, MaxQuietIn)
+	}
+}

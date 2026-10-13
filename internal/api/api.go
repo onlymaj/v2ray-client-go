@@ -494,6 +494,8 @@ func mixed(addrs []netip.Addr) bool {
 }
 
 // publicOnly is a net.Dialer Control hook that refuses blocked addresses.
+var errFetchRefused = errors.New("subscription address refused")
+
 // fetchRefused is netguard.Refused; tests, whose servers are on loopback,
 // replace it.
 var fetchRefused = netguard.Refused
@@ -504,7 +506,7 @@ func notSelf(network, address string, _ syscall.RawConn) error {
 		return err
 	}
 	if fetchRefused(ap.Addr()) {
-		return fmt.Errorf("%w: %s", errRedirectBlocked, ap.Addr())
+		return fmt.Errorf("%w: %s is this container, its gateway, a loopback or a link-local address", errFetchRefused, ap.Addr())
 	}
 	return nil
 }

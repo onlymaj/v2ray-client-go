@@ -296,14 +296,24 @@ func copyHalf(dst, src net.Conn, w *watch, add func(int64)) {
 		if n < len(small) {
 			continue
 		}
-		// Data is flowing: the large buffer, until a read comes back
-		// with less than the small one would have held.
+		// Data is flowing: the large buffer, for as long as reads come
+		// back mostly full. A read that does not has emptied the source
+		// and the next one may wait. (Round 21: "at least the small
+		// buffer's worth" kept the large one through the wait after almost
+		// every burst. "Full" would be the strict test, but the read after
+		// the small one never gets a whole TLS record, and a steady flow
+		// would then use two reads and two writes for each.) What is
+		// left: a burst that ends on a nearly full read waits with the
+		// large buffer, and a peer can arrange that.
 		bp := bufPool.Get().(*[]byte)
-		for n >= len(small) {
+		for stay := len(*bp) * 3 / 4; ; {
 			n, err = src.Read(*bp)
 			if pass((*bp)[:n], err) {
 				bufPool.Put(bp)
 				return
+			}
+			if n < stay {
+				break
 			}
 		}
 		bufPool.Put(bp)

@@ -111,10 +111,7 @@ add name=v2ray key=ROS_USER value="v2ray"
 add name=v2ray key=ROS_PASS value="another-long-random"
 ```
 
-Replace `another-long-random` with a password of your own, here and in section 9. The app does not start the sync with the example value.
-
-
-Replace both passwords before you paste this. The app refuses to start with `change-me-long-random` as `ADMIN_PASSWORD`, and logs a warning for one shorter than 10 characters. Failed logins are written to the container log with the source address.
+Replace both passwords before you paste this (`another-long-random` also in section 9: the app does not start the sync with the example value). The app refuses to start with `change-me-long-random` as `ADMIN_PASSWORD`, and logs a warning for one shorter than 10 characters. Failed logins are written to the container log with the source address.
 
 | Variable | Required | Meaning |
 |---|---|---|

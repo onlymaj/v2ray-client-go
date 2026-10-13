@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -398,40 +399,42 @@ func (c *chunkConn) Read(p []byte) (int, error) {
 
 // Round 20: each direction of a relay held a 16 KiB buffer while it waited
 // for data, 32 KiB per idle connection. It waits with a small one and
-// takes the large one only while data flows.
+// takes the large one only while data flows. Round 21: the first version
+// kept the large one after any read of 2 KiB or more, which is after
+// almost every burst; the cases are the bursts that showed it. (A burst
+// whose last read is nearly a whole large buffer, or exactly the small
+// one, still waits with the large one.)
 func TestRelayWaitsWithASmallBuffer(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	var got bytes.Buffer
-	done := make(chan struct{})
-	go func() { io.Copy(&got, b); close(done) }()
-	p1, p2 := net.Pipe()
-	defer p1.Close()
-	defer p2.Close()
-	src := &chunkConn{Conn: p1, data: [][]byte{make([]byte, 100), make([]byte, 40000), make([]byte, 100)}}
-	w := newWatch(src, a, true)
-	defer w.stop()
-	total := int64(0)
-	copyHalf(a, src, w, func(n int64) { total += n })
-	a.Close()
-	<-done
-	if total != 40200 || got.Len() != 40200 {
-		t.Fatalf("copied %d, received %d, want 40200", total, got.Len())
-	}
-	// The first read (nothing known yet), the one after a short read, and
-	// the last one (after the flow ended) are the ones that can block.
-	last := len(src.sizes) - 1
-	if src.sizes[0] != idleBuf || src.sizes[1] != idleBuf || src.sizes[last] != idleBuf {
-		t.Fatalf("read sizes %v: the reads that wait must use the small buffer", src.sizes)
-	}
-	big := 0
-	for _, n := range src.sizes {
-		if n > idleBuf {
-			big++
+	for _, burst := range [][]int{{100}, {1500}, {4096}, {6000}, {16384, 3000}, {16384, 16384, 9000}, {1000, 1000, 5000}, {100, 40000, 100}} {
+		a, b := net.Pipe()
+		var got bytes.Buffer
+		done := make(chan struct{})
+		go func() { io.Copy(&got, b); close(done) }()
+		p1, p2 := net.Pipe()
+		src := &chunkConn{Conn: p1}
+		want := 0
+		for _, n := range burst {
+			src.data = append(src.data, make([]byte, n))
+			want += n
 		}
-	}
-	if big == 0 {
-		t.Fatalf("read sizes %v: the large buffer was never used", src.sizes)
+		w := newWatch(src, a, true)
+		total := int64(0)
+		copyHalf(a, src, w, func(n int64) { total += n })
+		w.stop()
+		a.Close()
+		<-done
+		b.Close()
+		p1.Close()
+		p2.Close()
+		if total != int64(want) || got.Len() != want {
+			t.Fatalf("%v: copied %d, received %d", burst, total, got.Len())
+		}
+		// The last read is the one that would wait for more.
+		if n := src.sizes[len(src.sizes)-1]; n != idleBuf || src.sizes[0] != idleBuf {
+			t.Errorf("%v: read sizes %v: the reads that wait must use the small buffer", burst, src.sizes)
+		}
+		if big := slices.Max(src.sizes) > idleBuf; big != (want >= idleBuf) {
+			t.Errorf("%v: read sizes %v: large buffer used %v", burst, src.sizes, big)
+		}
 	}
 }

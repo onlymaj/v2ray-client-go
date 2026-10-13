@@ -855,7 +855,7 @@ func TestFetchRefusesSelfAndGateway(t *testing.T) {
 	}
 	fetchRefused = func(ip netip.Addr) bool { return ip.IsLoopback() } // as netguard.Refused does
 	defer func() { fetchLookup, fetchRefused = oldL, oldR }()
-	if _, err := defaultFetch(context.Background(), "http://sub.example:"+port+"/"); !errors.Is(err, errRedirectBlocked) || hits.Load() != 0 {
+	if _, err := defaultFetch(context.Background(), "http://sub.example:"+port+"/"); !errors.Is(err, errFetchRefused) || hits.Load() != 0 {
 		t.Fatalf("err %v, %d requests reached the server", err, hits.Load())
 	}
 }

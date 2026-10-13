@@ -71,6 +71,9 @@ func TestSettingsValidation(t *testing.T) {
 		"ui port 0":             func(s *Settings) { s.Ports.UI = 0 },
 		"transparent port 0":    func(s *Settings) { s.Ports.Transparent = 0 },
 		"dns upstream name":     func(s *Settings) { s.DNSUpstream = "not an address" },
+		"dns upstream loopback": func(s *Settings) { s.DNSUpstream = "127.0.0.1:53" }, // round 20
+		"dns upstream mapped":   func(s *Settings) { s.DNSUpstream = "[::ffff:127.0.0.1]:53" },
+		"dns upstream any":      func(s *Settings) { s.DNSUpstream = "0.0.0.0:53" },
 		"dns upstream no port":  func(s *Settings) { s.DNSUpstream = "1.1.1.1" },
 		"dns upstream port 0":   func(s *Settings) { s.DNSUpstream = "1.1.1.1:0" },
 		"health url scheme":     func(s *Settings) { s.HealthURL = "ftp://x/" },
