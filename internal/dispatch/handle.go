@@ -128,6 +128,9 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 	relay(conn, out, t, len(head) > 0)
 }
 
+// maxSniffReads is how many reads peek waits for a head to be complete.
+const maxSniffReads = 16
+
 // peek reads client-first data into buf until a domain is found, the
 // protocol is ruled out, buf is full or sniffTimeout passes. It returns
 // the bytes read; err is set only when the client went away with nothing
@@ -136,7 +139,14 @@ func peek(conn net.Conn, buf []byte) (head []byte, domain string, err error) {
 	conn.SetReadDeadline(time.Now().Add(sniffTimeout))
 	defer conn.SetReadDeadline(time.Time{})
 	n := 0
-	for n < len(buf) {
+	for reads := 0; n < len(buf); reads++ {
+		// Every read parses the head again from its start. A device that
+		// sent an HTTP-looking head a byte per packet had it parsed 4096
+		// times, CPU for next to no traffic (round 22). A real head comes
+		// in a few packets.
+		if reads == maxSniffReads {
+			break
+		}
 		m, rerr := conn.Read(buf[n:])
 		n += m
 		if m > 0 {

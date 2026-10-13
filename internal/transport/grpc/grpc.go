@@ -97,15 +97,13 @@ type Client struct {
 	ua        string
 	t         *http2.Transport
 
-	mu sync.Mutex
-	cc *http2.ClientConn
-	// draining holds replaced connections that still have tunnels, oldest
-	// first.
-	draining []*http2.ClientConn
-	raw      net.Conn // underlying conn of cc, for addresses
-	closed   bool
-	streams  int         // tunnels open on cc
-	idle     *time.Timer // closes cc; running while streams is 0
+	mu      sync.Mutex
+	cc      *http2.ClientConn
+	raw     net.Conn // underlying conn of cc, for addresses
+	closed  bool
+	streams int            // tunnels open on cc
+	srcs    map[string]int // and how many of them each source has
+	idle    *time.Timer    // closes cc; running while streams is 0
 }
 
 var _ StreamDialer = (*Client)(nil)
@@ -350,33 +348,27 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 	// claims a slot that the next RoundTrip uses.
 	if c.cc == nil || !c.cc.ReserveNewRequest() {
 		if old := c.cc; old != nil {
-			// A server that allows one stream per connection would
-			// otherwise get a TLS and HTTP/2 connection for every tunnel
-			// (round 21). The oldest replaced connection is closed and its
-			// tunnels end; new tunnels are not refused, because a server
-			// that retires its connections with GOAWAY (nginx does after
-			// 1000 requests or an hour) fills the places in honest use and
-			// the client then failed until a tunnel ended (round 22).
+			// Let its remaining streams finish, then close it. Until then
+			// it is counted in drainSet.
 			if c.streams > 0 {
-				if len(c.draining) >= maxDraining {
-					go c.draining[0].Close()
-					c.draining = slices.Delete(c.draining, 0, 1)
+				if victim := drainAdd(old, c.srcs); victim != nil {
+					go victim.Close()
 				}
-				c.draining = append(c.draining, old)
 			}
-			// Let its remaining streams finish, then close it.
 			go func() {
-				old.Shutdown(context.Background())
-				c.mu.Lock()
-				if i := slices.Index(c.draining, old); i >= 0 {
-					c.draining = slices.Delete(c.draining, i, i+1)
+				// A tunnel that has reserved the last stream but not yet
+				// started it would fail: Shutdown closes a connection
+				// without streams at once (round 22).
+				for i := 0; i < 100 && old.State().StreamsReserved > 0; i++ {
+					time.Sleep(10 * time.Millisecond)
 				}
-				c.mu.Unlock()
+				old.Shutdown(context.Background())
+				drainDrop(old)
 			}()
 			idleDrop(c, old)
 			c.cc, c.raw = nil, nil
 		}
-		c.streams = 0
+		c.streams, c.srcs = 0, nil
 		raw, err := dialRaw(ctx)
 		if err != nil {
 			return nil, err
@@ -398,12 +390,17 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		idleDrop(c, c.cc)
 	}
 	cc := c.cc
-	s, err := c.open(cc, c.raw, transport.Source(ctx), func() { c.streamDone(cc) })
+	src := transport.Source(ctx)
+	s, err := c.open(cc, c.raw, src, func() { c.streamDone(cc, src) })
 	if err != nil {
 		c.streamDoneLocked(cc)
 		return nil, err
 	}
 	c.streams++
+	if c.srcs == nil {
+		c.srcs = map[string]int{}
+	}
+	c.srcs[src]++
 	return s, nil
 }
 
@@ -415,11 +412,16 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 // is ours rather than the HTTP/2 transport's IdleConnTimeout, so that it
 // cannot close a connection DialStream has just handed a tunnel, and so
 // that the closed connection is let go of here.
-func (c *Client) streamDone(cc *http2.ClientConn) {
+func (c *Client) streamDone(cc *http2.ClientConn, src string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cc == cc {
 		c.streams--
+		if c.srcs[src]--; c.srcs[src] <= 0 {
+			delete(c.srcs, src)
+		}
+	} else {
+		drainDone(cc, src)
 	}
 	c.streamDoneLocked(cc)
 }
@@ -449,11 +451,84 @@ func (c *Client) closeIdle(cc *http2.ClientConn) {
 	}
 }
 
-// maxDraining is how many replaced connections of one client may still
-// have tunnels; one more and the oldest is closed. With the usual 100
-// streams per connection that is far more tunnels than the inbound side
-// accepts.
-const maxDraining = 7
+// maxDraining bounds, over all clients, the replaced connections that still
+// have tunnels. A server that allows one stream per connection would
+// otherwise get a TLS and HTTP/2 connection for every tunnel (round 21).
+// Refusing new tunnels at the bound locked out clients whose server retires
+// connections with GOAWAY, as nginx does after 1000 requests or an hour; a
+// bound per client, closing its oldest, let one LAN device that parks a
+// tunnel on each retired connection have other devices' long-lived tunnels
+// cut (round 22). So the connection closed is one of the source that has
+// tunnels on the most replaced connections, the one with the fewest tunnels
+// of other sources, the oldest first. A variable for tests.
+var maxDraining = 32
+
+type drained struct {
+	cc   *http2.ClientConn
+	srcs map[string]int // tunnels per source
+}
+
+// drainSet lists the replaced connections, oldest first. Like idleSet's,
+// its lock is taken with a Client's mu held, never the other way round.
+var drainSet struct {
+	sync.Mutex
+	list []drained
+}
+
+// drainAdd records the replaced cc and its tunnels. Over maxDraining it
+// returns the connection to close.
+func drainAdd(cc *http2.ClientConn, srcs map[string]int) *http2.ClientConn {
+	drainSet.Lock()
+	defer drainSet.Unlock()
+	drainSet.list = append(drainSet.list, drained{cc, srcs})
+	if len(drainSet.list) <= maxDraining {
+		return nil
+	}
+	on := map[string]int{} // replaced connections each source has tunnels on
+	most := 0
+	for _, d := range drainSet.list {
+		for src := range d.srcs {
+			on[src]++
+			most = max(most, on[src])
+		}
+	}
+	victim, others := 0, -1
+	for i, d := range drainSet.list {
+		own, all := 0, 0
+		for src, n := range d.srcs {
+			all += n
+			if on[src] == most {
+				own += n
+			}
+		}
+		if own > 0 && (others < 0 || all-own < others) {
+			victim, others = i, all-own
+		}
+	}
+	cc = drainSet.list[victim].cc
+	drainSet.list = slices.Delete(drainSet.list, victim, victim+1)
+	return cc
+}
+
+// drainDone notes that a tunnel of src on the replaced cc has ended.
+func drainDone(cc *http2.ClientConn, src string) {
+	drainSet.Lock()
+	defer drainSet.Unlock()
+	for _, d := range drainSet.list {
+		if d.cc == cc {
+			if d.srcs[src]--; d.srcs[src] <= 0 {
+				delete(d.srcs, src)
+			}
+			return
+		}
+	}
+}
+
+func drainDrop(cc *http2.ClientConn) {
+	drainSet.Lock()
+	defer drainSet.Unlock()
+	drainSet.list = slices.DeleteFunc(drainSet.list, func(d drained) bool { return d.cc == cc })
+}
 
 // maxIdleConns bounds the connections without a tunnel over all clients.
 // One lingers for idleTimeout after every health probe, and a subscription
@@ -516,7 +591,7 @@ func (c *Client) Close() error {
 	}
 	idleDrop(c, c.cc)
 	err := c.cc.Close()
-	c.cc, c.raw = nil, nil
+	c.cc, c.raw, c.srcs = nil, nil, nil
 	return err
 }
 

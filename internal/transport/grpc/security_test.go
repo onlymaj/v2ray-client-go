@@ -911,8 +911,9 @@ func TestIdleConnsAreBoundedOverAllClients(t *testing.T) {
 // Round 21: a server that allows one stream per connection got a TLS and
 // HTTP/2 connection for every tunnel, without limit. Round 22: the bound
 // refused new tunnels, which locked out a client whose server retires
-// connections with GOAWAY; the oldest replaced connection is closed instead.
+// connections with GOAWAY; a replaced connection is closed instead.
 func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
+	setMaxDraining(t, 7)
 	addr, _ := h2Echo(t, 1)
 	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
 	cl := l.(*Client)
@@ -924,14 +925,6 @@ func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
 			c.Close()
 		}
 	}()
-	echo := func(c net.Conn) error {
-		c.SetDeadline(time.Now().Add(3 * time.Second))
-		if _, err := c.Write([]byte("x")); err != nil {
-			return err
-		}
-		_, err := io.ReadFull(c, make([]byte, 1))
-		return err
-	}
 	const extra = 3
 	for i := 0; i < maxDraining+1+extra; i++ {
 		c, err := cl.DialStream(context.Background(), dial)
@@ -940,20 +933,124 @@ func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
 		}
 		open = append(open, c)
 		// A round trip, so the server's stream limit has arrived.
-		if err := echo(c); err != nil {
+		if err := echoOnce(c); err != nil {
 			t.Fatalf("tunnel %d: %v", i, err)
 		}
 	}
-	cl.mu.Lock()
-	n := len(cl.draining)
-	cl.mu.Unlock()
-	if n > maxDraining {
+	if n := drainLen(); n > maxDraining {
 		t.Fatalf("%d replaced connections still open, want at most %d", n, maxDraining)
 	}
 	for i, c := range open {
-		err := echo(c)
+		err := echoOnce(c)
 		if old := i < extra; old != (err != nil) {
 			t.Fatalf("tunnel %d of %d: err %v, want the oldest %d ended and the rest alive", i, len(open), err, extra)
 		}
+	}
+}
+
+func setMaxDraining(t *testing.T, n int) {
+	old := maxDraining
+	maxDraining = n
+	t.Cleanup(func() {
+		maxDraining = old
+		drainSet.Lock()
+		drainSet.list = nil
+		drainSet.Unlock()
+	})
+}
+
+func drainLen() int {
+	drainSet.Lock()
+	defer drainSet.Unlock()
+	return len(drainSet.list)
+}
+
+func echoOnce(c net.Conn) error {
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := c.Write([]byte("x")); err != nil {
+		return err
+	}
+	_, err := io.ReadFull(c, make([]byte, 1))
+	return err
+}
+
+// Round 22: the bound on replaced connections was per client and closed
+// the oldest. A LAN device that parked one tunnel on each replaced
+// connection had the oldest ones closed, with the long-lived tunnels of
+// other devices on them. The connection closed is now one of the device
+// that holds the most of them, and one it does not share if there is one.
+func TestParkedTunnelsCostTheirOwner(t *testing.T) {
+	setMaxDraining(t, 3)
+	addr, _ := h2Echo(t, 2)
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	open := func(src string) net.Conn {
+		t.Helper()
+		c, err := cl.DialStream(transport.WithSource(context.Background(), src), dial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		if err := echoOnce(c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	victim := open("victim") // on the first connection, which is the oldest
+	var parked []net.Conn
+	// Two tunnels fill a connection; the next dial replaces it.
+	for range 2*(maxDraining+2) - 1 {
+		parked = append(parked, open("parker"))
+	}
+	if n := drainLen(); n > maxDraining {
+		t.Fatalf("%d replaced connections, want at most %d", n, maxDraining)
+	}
+	if err := echoOnce(victim); err != nil {
+		t.Fatalf("the other device's tunnel was cut: %v", err)
+	}
+	cut := 0
+	for _, c := range parked {
+		if echoOnce(c) != nil {
+			cut++
+		}
+	}
+	if cut != 2 {
+		t.Fatalf("%d of the parker's tunnels were cut, want the 2 on one connection", cut)
+	}
+}
+
+// Round 22: a tunnel that had reserved a connection's last stream could be
+// failed by the next dial, which found the connection full and shut it
+// down before the stream had started.
+func TestLastStreamSurvivesTheNextDial(t *testing.T) {
+	addr, _ := h2Echo(t, 2)
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	for round := range 10 {
+		l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+		cl := l.(*Client)
+		first, err := cl.DialStream(context.Background(), dial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := echoOnce(first); err != nil { // the stream limit has arrived
+			t.Fatal(err)
+		}
+		last, err := cl.DialStream(context.Background(), dial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next, err := cl.DialStream(context.Background(), dial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := echoOnce(last); err != nil {
+			t.Fatalf("round %d: the tunnel on the last stream failed: %v", round, err)
+		}
+		first.Close()
+		last.Close()
+		next.Close()
+		cl.Close()
 	}
 }
