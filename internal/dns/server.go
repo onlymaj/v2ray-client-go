@@ -188,8 +188,14 @@ func (s *Server) SetUpstream(addr string) {
 	s.mu.Lock()
 	s.upstream, s.upErr = a, err
 	s.gen++
+	// In the same step as gen: a query must not take an old connection
+	// and pool it again under the new gen.
+	old := s.idle
+	s.idle = map[string]idleConn{}
 	s.mu.Unlock()
-	s.closeIdle()
+	for _, ic := range old {
+		ic.conn.Close()
+	}
 	if err != nil {
 		s.opts.Logf("dns: upstream %q: %v", addr, err)
 	}

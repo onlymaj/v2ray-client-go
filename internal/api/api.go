@@ -81,12 +81,7 @@ type Options struct {
 	CheckClient func(c config.Client) error
 }
 
-const (
-	maxBody = 4 << 20
-	// maxCheckNow caps the immediate health checks started for new
-	// clients; the health checker reaches the rest on its schedule.
-	maxCheckNow = 50
-)
+const maxBody = 4 << 20
 
 type server struct {
 	store *config.Store

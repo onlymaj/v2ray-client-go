@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Entry is one row of /ip/firewall/address-list. RouterOS returns every
@@ -146,9 +147,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if resp.StatusCode >= 300 {
 		var ae apiError
 		if json.Unmarshal(b, &ae) == nil && (ae.Message != "" || ae.Detail != "") {
-			return fmt.Errorf("routeros %s %s: %d %s: %s", method, path, resp.StatusCode, ae.Message, ae.Detail)
+			return fmt.Errorf("routeros %s %s: %d %s: %s", method, path, resp.StatusCode, clean(ae.Message), clean(ae.Detail))
 		}
-		return fmt.Errorf("routeros %s %s: %s", method, path, resp.Status)
+		return fmt.Errorf("routeros %s %s: %s", method, path, clean(resp.Status))
 	}
 	if out == nil {
 		return nil
@@ -157,4 +158,27 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("routeros %s %s: decoding response: %w", method, path, err)
 	}
 	return nil
+}
+
+// maxErrText bounds text from the router's reply in an error.
+const maxErrText = 200
+
+// clean makes text from the router's reply fit for an error that is logged:
+// one short line. The reply can be megabytes, and without a pinned
+// certificate anyone answering at the URL writes it.
+func clean(s string) string {
+	cut := len(s) > maxErrText
+	if cut {
+		s = s[:maxErrText]
+	}
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			return ' '
+		}
+		return r
+	}, s)
+	if cut {
+		s += "..."
+	}
+	return s
 }

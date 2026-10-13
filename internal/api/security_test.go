@@ -122,8 +122,10 @@ func TestImportCaps(t *testing.T) {
 	e.expect("POST", "/api/import", map[string]string{"text": manyLinks(t, 60)}, 200, nil)
 	e.rt.mu.Lock()
 	defer e.rt.mu.Unlock()
-	if len(e.rt.checked) != maxCheckNow {
-		t.Fatalf("CheckNow called %d times", len(e.rt.checked))
+	// Round 16: imported clients are left to the health checker's own
+	// lane for untrusted clients; they must not fill the CheckNow lane.
+	if len(e.rt.checked) != 0 {
+		t.Fatalf("CheckNow called %d times for imported clients", len(e.rt.checked))
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -449,5 +450,21 @@ func TestOversizedChunkRefusedBeforeAllocating(t *testing.T) {
 		if got, err := dec.open(bytes.NewReader(wire), nil); err != nil || len(got) != maxChunkIn {
 			t.Errorf("%s: chunk at the limit: len %d err %v", name, len(got), err)
 		}
+	}
+}
+
+// Round 16: the response header buffer was allocated from its sealed
+// length (up to 64 KiB) before the header arrived; a server that sent the
+// length and nothing else held it on every connection.
+func TestOversizedResponseHeaderRefusedBeforeAllocating(t *testing.T) {
+	rk, ri := make([]byte, 16), make([]byte, 16)
+	sealed := sealResponseHeader(rk, ri, make([]byte, maxRespHeader+1))
+	_, err := readResponseHeader(bytes.NewReader(sealed[:18]), rk, ri) // the length alone
+	if err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("length of %d alone gave %v, want a refusal", maxRespHeader+1, err)
+	}
+	hdr := make([]byte, 4+255) // the largest Xray sends
+	if got, err := readResponseHeader(bytes.NewReader(sealResponseHeader(rk, ri, hdr)), rk, ri); err != nil || len(got) != len(hdr) {
+		t.Fatalf("largest real header: len %d err %v", len(got), err)
 	}
 }

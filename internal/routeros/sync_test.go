@@ -462,3 +462,30 @@ func TestResolveAllDeadNamesDoNotStarve(t *testing.T) {
 		t.Fatalf("known name not refreshed behind dead names: %v", got)
 	}
 }
+
+// Round 16: every failed write kept the router's whole reply (up to 4 MB,
+// with its newlines) and all of them were joined into one log message on
+// every retry; 300 refused addresses made a 600 KB, 600-line log entry.
+func TestSyncErrorsAreShortAndOneLine(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Write([]byte("[]"))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]any{"error": 403, "message": "Forbidden", "detail": strings.Repeat("not allowed\n", 200)})
+	}))
+	defer srv.Close()
+	var desired []string
+	for i := range 300 {
+		desired = append(desired, fmt.Sprintf("203.0.%d.%d", i/250, i%250+1))
+	}
+	s := New(Options{Logf: func(string, ...any) {}})
+	_, err := s.reconcile(context.Background(), newClient(srv.URL+"/rest", "u", "p", srv.Client()), "no-proxy", desired, true)
+	if err == nil {
+		t.Fatal("no error from 300 refused writes")
+	}
+	if msg := err.Error(); len(msg) > 2000 || strings.ContainsAny(msg, "\r\n") || !strings.Contains(msg, "297 more") {
+		t.Fatalf("error is %d bytes: %.300q", len(msg), msg)
+	}
+}

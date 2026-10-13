@@ -135,7 +135,16 @@ func New(settings []byte) (transport.Layer, error) {
 	// the reader is slow: a LAN device that stops reading its downloads
 	// would pin 4 MiB per connection. ConfigureTransports is the only way to
 	// set the window; the http.Transport itself is never used.
-	t, err := http2.ConfigureTransports(&http.Transport{HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow}})
+	//
+	// IdleConnTimeout closes the shared connection once it has had no
+	// tunnel for that long. Without it a connection lives for ever: every
+	// health-checked client of a subscription (up to 1000) kept a TLS and
+	// HTTP/2 connection and its pings after one probe, and so did a client
+	// that was disabled. DialStream dials again when it is needed.
+	t, err := http2.ConfigureTransports(&http.Transport{
+		IdleConnTimeout: time.Duration(idleTimeout.Load()),
+		HTTP2:           &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
@@ -222,7 +231,14 @@ func tunMultiStreamName(s string) string {
 // Atomic so tests can lower it.
 var writeTimeout atomic.Int64
 
-func init() { writeTimeout.Store(int64(30 * time.Second)) }
+// idleTimeout is how long the shared connection is kept with no tunnel on
+// it. Atomic so tests can lower it.
+var idleTimeout atomic.Int64
+
+func init() {
+	writeTimeout.Store(int64(30 * time.Second))
+	idleTimeout.Store(int64(90 * time.Second))
+}
 
 // guardConn sits between the HTTP/2 client and the connection to the server.
 //
@@ -585,7 +601,13 @@ func (s *streamConn) setSlow(slow bool) {
 				count[o.src]++
 				most = max(most, count[o.src])
 			}
-			i := slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most })
+			// Of that source, the oldest whose reader has data waiting
+			// right now; one that has just resumed is still listed until
+			// its window ends, but pins nothing.
+			i := slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most && o.blocked.Load() })
+			if i < 0 {
+				i = slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most })
+			}
 			victim = slowList[i]
 			victim.slow, victim.ended = false, true
 			slowList = slices.Delete(slowList, i, i+1)
@@ -931,7 +953,10 @@ func readHunks(r *bufio.Reader, emit func([]byte) error) error {
 					// declares a large entry must not make us allocate it.
 					piece = make([]byte, 0, min(left, readStart))
 				} else if len(piece) == cap(piece) {
-					piece = slices.Grow(piece, min(left, readStep-len(piece), len(piece)))[:len(piece)]
+					// Exactly: append would round up to a size class.
+					np := make([]byte, len(piece), len(piece)+min(left, readStep-len(piece), len(piece)))
+					copy(np, piece)
+					piece = np
 				}
 				k := min(n, cap(piece)-len(piece))
 				if _, err := io.ReadFull(r, piece[len(piece):len(piece)+k]); err != nil {

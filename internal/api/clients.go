@@ -283,10 +283,7 @@ func (s *server) importLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := make([]clientView, 0, len(added))
-	for i, c := range added {
-		if i < maxCheckNow {
-			s.rt.CheckNow(c.ID)
-		}
+	for _, c := range added { // checked at once by the health checker, see refresh
 		views = append(views, s.clientView(c))
 	}
 	errs := res.Errors

@@ -65,6 +65,10 @@ type target struct {
 	curDelay         float32             // latest sample, NaN when down/none
 	curDelayAge      int                 // minutes since curDelay was recorded
 	hasDelay         bool
+	// Minutes in a row with no traffic, and with no delay sample. After a
+	// whole ring of them the ring holds nothing and is released: a
+	// subscription can make each of its 1000 clients carry traffic once.
+	quiet, delayQuiet int
 }
 
 // Stats is safe for concurrent use.
@@ -363,6 +367,11 @@ func (s *Stats) sample(t *target, dt float64, closeMin bool) {
 		n := float64(s.secCount)
 		t.r.minUp[s.minHead] = float32(t.accUp / n)
 		t.r.minDown[s.minHead] = float32(t.accDown / n)
+		if t.accUp != 0 || t.accDown != 0 {
+			t.quiet = 0
+		} else if t.quiet++; t.quiet >= minPoints {
+			t.r, t.quiet = nil, 0
+		}
 	}
 	t.accUp, t.accDown = 0, 0
 	if t.delay != nil {
@@ -372,6 +381,11 @@ func (s *Stats) sample(t *target, dt float64, closeMin bool) {
 		}
 		t.delay[s.minHead] = v
 		t.curDelayAge++
+		if v == v { // not NaN
+			t.delayQuiet = 0
+		} else if t.delayQuiet++; t.delayQuiet >= minPoints {
+			t.delay, t.delayQuiet = nil, 0
+		}
 	}
 }
 

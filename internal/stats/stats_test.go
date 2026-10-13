@@ -299,3 +299,33 @@ func TestDeadClientsKeepNoDelayRingAndRetain(t *testing.T) {
 		t.Fatalf("targets after Retain: %d", len(s.targets))
 	}
 }
+
+// Round 16: the history rings of a client were kept until it was removed,
+// so a subscription whose 1000 clients each carried traffic once pinned
+// about 18 MB. A ring with a whole day of nothing is released.
+func TestQuietRingsAreReleased(t *testing.T) {
+	s := New(nil)
+	now := time.Unix(5_000_000, 0)
+	s.tick(now)
+	c := s.Open(src, "d", "", "r", "c1", "")
+	c.AddUp(1000)
+	s.RecordDelay("c1", 20)
+	now = ticks(s, now, 60)
+	c.Close()
+	tg := s.get("client:c1")
+	if tg.r == nil || tg.delay == nil {
+		t.Fatal("rings not allocated")
+	}
+	s.RecordDelay("c1", -1)
+	now = ticks(s, now, 60*(minPoints-2))
+	if tg.r == nil || tg.delay == nil {
+		t.Fatal("rings released while they still hold samples of the last 24 h")
+	}
+	ticks(s, now, 60*(delayStale+3))
+	if tg.r != nil || tg.delay != nil {
+		t.Fatalf("rings kept after a day of nothing: traffic %v delay %v", tg.r != nil, tg.delay != nil)
+	}
+	if sr, err := s.Series("client:c1", "24h"); err != nil || len(sr.Up) != minPoints {
+		t.Fatalf("series after release: %v", err)
+	}
+}

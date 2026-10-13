@@ -695,3 +695,74 @@ func TestHunkHeaderAloneAllocatesLittle(t *testing.T) {
 		t.Fatalf("%d stuck hunk headers allocated %d bytes", n, d)
 	}
 }
+
+type closeSpy struct {
+	net.Conn
+	closed *atomic.Int32
+}
+
+func (c closeSpy) Close() error {
+	c.closed.Add(1)
+	return c.Conn.Close()
+}
+
+// Round 16: the shared HTTP/2 connection had no idle timeout, so one health
+// probe left a TLS and HTTP/2 connection open (and pinging) for ever on
+// every gRPC client, 1000 of them from one subscription.
+func TestIdleSharedConnIsClosed(t *testing.T) {
+	old := idleTimeout.Swap(int64(200 * time.Millisecond))
+	defer idleTimeout.Store(old)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	h2 := &http2.Server{}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go h2.ServeConn(c, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/grpc")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				io.Copy(io.Discard, r.Body)
+			})})
+		}
+	}()
+	var dials, closed atomic.Int32
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	probe := func() {
+		c, err := cl.DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+			dials.Add(1)
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			return closeSpy{raw, &closed}, err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+	}
+	probe()
+	probe() // within the idle time: same connection
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("%d dials for two probes in a row, want 1", n)
+	}
+	for i := 0; closed.Load() == 0 && i < 300; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if closed.Load() == 0 {
+		t.Fatal("idle shared connection still open after 3 s")
+	}
+	probe()
+	if n := dials.Load(); n != 2 {
+		t.Fatalf("%d dials, want 2 (a new connection after the idle one closed)", n)
+	}
+}

@@ -135,6 +135,9 @@ func sealHeader(cmdKey [16]byte, data []byte) []byte {
 // DecodeResponseHeader (AEAD branch): GCM(len)(18) | GCM(payload)(len+16),
 // keyed from the response body key/IV with no additional data. It returns
 // the decrypted payload: V | option | cmd | cmdLen | cmd data.
+// maxRespHeader bounds the declared length of a response header.
+const maxRespHeader = 512
+
 func readResponseHeader(r io.Reader, respKey, respIV []byte) ([]byte, error) {
 	var encLen [18]byte
 	if _, err := io.ReadFull(r, encLen[:]); err != nil {
@@ -144,7 +147,14 @@ func readResponseHeader(r io.Reader, respKey, respIV []byte) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("vmess: bad response header length (wrong id?)")
 	}
-	enc := make([]byte, int(binary.BigEndian.Uint16(l))+16)
+	// Xray's header is 4 bytes plus at most 255 of command data. The
+	// length is sealed, but by a server that may be hostile: it must not
+	// make every connection hold 64 KiB while the header never comes.
+	n := int(binary.BigEndian.Uint16(l))
+	if n > maxRespHeader {
+		return nil, errors.New("vmess: response header too large")
+	}
+	enc := make([]byte, n+16)
 	if _, err := io.ReadFull(r, enc); err != nil {
 		return nil, err
 	}

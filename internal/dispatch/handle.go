@@ -13,6 +13,7 @@ import (
 	"github.com/onlymaj/v2ray-client-go/internal/client"
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 	"github.com/onlymaj/v2ray-client-go/internal/sniff"
+	"github.com/onlymaj/v2ray-client-go/internal/transport"
 )
 
 // Tracker records connections for the stats/UI layer (internal/stats).
@@ -77,7 +78,9 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	// The source lets a transport that shares limits between tunnels
+	// charge them to this device (round 16: only DNS dials carried it).
+	ctx, cancel := context.WithTimeout(transport.WithSource(context.Background(), src.Addr().String()), dialTimeout)
 	defer cancel()
 	dec := d.Route(src.Addr(), domain, dst.IP)
 	if dec.Kind == KindDirect && !dst.IP.IsValid() {

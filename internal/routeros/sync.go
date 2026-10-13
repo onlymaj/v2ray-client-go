@@ -221,7 +221,7 @@ func (s *Syncer) Run(ctx context.Context) {
 			s.mu.Lock()
 			s.status.LastError = ""
 			if err := errors.Join(syncErr, resolveErr); err != nil {
-				s.status.LastError = err.Error()
+				s.status.LastError = clean(err.Error())
 			}
 			s.mu.Unlock()
 			wakeAt = nextResolve
@@ -383,7 +383,7 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 		out = append(out, a)
 	}
 	slices.Sort(out)
-	return out, hold, errors.Join(errs...)
+	return out, hold, firstErrs(errs)
 }
 
 // normAddr turns "1.2.3.4/32" into "1.2.3.4"; other values pass through.
@@ -435,13 +435,16 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 		owned++
 	}
 
+	// One log line per pass, not per address or per error: a subscription
+	// can bring 2048 addresses, and each can fail or change on every pass.
 	var errs []error
+	var added, removed int
 	for _, e := range stale {
 		if err := c.Remove(ctx, e.ID); err != nil {
 			errs = append(errs, err)
 			owned++
 		} else {
-			s.opts.Logf("routeros: removed %s from %s", e.Address, list)
+			removed++
 		}
 	}
 	for _, a := range desired {
@@ -452,8 +455,32 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 			errs = append(errs, err)
 		} else {
 			owned++
-			s.opts.Logf("routeros: added %s to %s", a, list)
+			added++
 		}
 	}
-	return owned, errors.Join(errs...)
+	if added+removed > 0 {
+		s.opts.Logf("routeros: %s: added %d, removed %d", list, added, removed)
+	}
+	return owned, firstErrs(errs)
+}
+
+// maxErrsShown is how many errors of one pass are reported.
+const maxErrsShown = 3
+
+// firstErrs joins the first few errors on one line and counts the rest.
+func firstErrs(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	for i, err := range errs[:min(len(errs), maxErrsShown)] {
+		if i > 0 {
+			b.WriteString("; ")
+		}
+		b.WriteString(err.Error())
+	}
+	if n := len(errs) - maxErrsShown; n > 0 {
+		fmt.Fprintf(&b, "; and %d more errors", n)
+	}
+	return errors.New(b.String())
 }

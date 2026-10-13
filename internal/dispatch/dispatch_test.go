@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"github.com/onlymaj/v2ray-client-go/internal/transport"
 	"io"
 	"net"
 	"net/netip"
@@ -53,7 +54,11 @@ func init() {
 
 type fakeProto struct{}
 
+// lastSource is the transport.Source of the latest fakeProto dial.
+var lastSource atomic.Value
+
 func (fakeProto) Dial(ctx context.Context, _ string, dest outbound.Addr) (net.Conn, error) {
+	lastSource.Store(transport.Source(ctx))
 	var d net.Dialer
 	c, err := d.DialContext(ctx, "tcp", echoAddr)
 	if err != nil {

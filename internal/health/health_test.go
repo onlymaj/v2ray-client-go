@@ -305,3 +305,50 @@ func TestStallingUntrustedClientsDoNotStarveOthers(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+type gateProber struct {
+	gate  chan struct{}
+	calls atomic.Int32
+}
+
+func (p *gateProber) DialServer(ctx context.Context) (time.Duration, error) {
+	if p.calls.Add(1) == 1 {
+		<-p.gate
+		return 0, errors.New("old failure")
+	}
+	return 0, errors.New("new failure")
+}
+func (p *gateProber) Dial(context.Context, string, outbound.Addr) (net.Conn, error) {
+	return nil, errors.New("unused")
+}
+
+// Round 16: a check in flight when a client was disabled and enabled again
+// was recorded on the new entry: the client counted as checked and down
+// (its group could go direct) and its real first check was put off by a
+// whole interval.
+func TestStaleCheckNotRecordedOnReenabledClient(t *testing.T) {
+	p := &gateProber{gate: make(chan struct{})}
+	c := New(func(string) Prober { return p }, Options{Interval: time.Hour})
+	var mu sync.Mutex
+	var results []string
+	c.OnResult(func(id string, st Status) { mu.Lock(); results = append(results, st.LastError); mu.Unlock() })
+	c.SetClients([]string{"x"}, nil)
+	old := make(chan struct{})
+	go func() { c.CheckNow(context.Background(), "x"); close(old) }()
+	for p.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	c.SetClients(nil, nil)           // disabled
+	c.SetClients([]string{"x"}, nil) // and enabled again
+	close(p.gate)
+	<-old
+	mu.Lock()
+	n := len(results)
+	mu.Unlock()
+	if st := c.Status("x"); n != 0 || st.State != StateUnknown {
+		t.Fatalf("stale result recorded: %d callbacks, status %+v", n, st)
+	}
+	if st := c.CheckNow(context.Background(), "x"); st.LastError != "new failure" {
+		t.Fatalf("fresh check: %+v", st)
+	}
+}

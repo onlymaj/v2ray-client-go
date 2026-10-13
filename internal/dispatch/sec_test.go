@@ -233,3 +233,16 @@ func TestJustEnabledMemberBlocksUntilChecked(t *testing.T) {
 		t.Fatalf("c checked and down: %+v, want direct", got)
 	}
 }
+
+// Round 16: only DNS dials carried the device's address, so the per-device
+// cap on slow gRPC streams saw every relayed connection as one source.
+func TestHandleDialCarriesSource(t *testing.T) {
+	d, tr := newHandleDispatcher(t)
+	lastSource.Store("")
+	user, done := run(t, d, tr, outbound.Addr{IP: other, Port: 80}, false)
+	user.Close()
+	<-done
+	if got, want := lastSource.Load(), tr.open[0].src.Addr().String(); got != want || want == "" {
+		t.Fatalf("dial from Handle carried source %q, want %q", got, want)
+	}
+}

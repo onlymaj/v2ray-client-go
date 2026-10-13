@@ -215,11 +215,11 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	if err != nil {
 		return config.Subscription{}, err
 	}
-	for i, cid := range fresh {
-		if i < maxCheckNow {
-			s.rt.CheckNow(cid)
-		}
-	}
+	// No CheckNow for the new clients: the health checker checks a new
+	// client at once anyway, in the lane for untrusted clients. Here they
+	// would queue in the lane of the "check now" button and of the admin's
+	// own saves, 10 s each when their servers stall (round 16).
+	_ = fresh
 	return out, nil
 }
 

@@ -245,20 +245,24 @@ func (c *Checker) Run(ctx context.Context) {
 // returns the new status. It reports StateUnknown
 // for a client that lookup does not know.
 func (c *Checker) CheckNow(ctx context.Context, id string) Status {
-	return c.check(ctx, id, c.nowSem)
+	c.mu.Lock()
+	e := c.clients[id]
+	c.mu.Unlock()
+	return c.check(ctx, id, c.nowSem, e)
 }
 
 // run is a scheduled check; it reschedules the client when done.
 func (c *Checker) run(ctx context.Context, id string) {
 	sem := c.sem
 	c.mu.Lock()
-	if e := c.clients[id]; e != nil && e.low {
+	e := c.clients[id]
+	if e != nil && e.low {
 		sem = c.lowSem
 	}
 	c.mu.Unlock()
-	c.check(ctx, id, sem)
+	c.check(ctx, id, sem, e)
 	c.mu.Lock()
-	if e := c.clients[id]; e != nil {
+	if c.clients[id] == e && e != nil { // not one disabled and enabled meanwhile
 		e.running = false
 		// ±10% jitter so clients drift apart.
 		j := time.Duration((rand.Float64()*0.2 - 0.1) * float64(c.interval))
@@ -268,7 +272,11 @@ func (c *Checker) run(ctx context.Context, id string) {
 	c.poke()
 }
 
-func (c *Checker) check(ctx context.Context, id string, sem chan struct{}) Status {
+// check runs one check of id. e is the client's entry when the check was
+// asked for: the result is recorded only if the client still has that
+// entry. A client disabled and enabled again meanwhile has a new one, and
+// a result from before must not count as its first check (round 16).
+func (c *Checker) check(ctx context.Context, id string, sem chan struct{}, e *entry) Status {
 	p := c.lookup(id)
 	if p == nil {
 		return c.Status(id)
@@ -306,8 +314,7 @@ func (c *Checker) check(ctx context.Context, id string, sem chan struct{}) Statu
 	}
 
 	c.mu.Lock()
-	e := c.clients[id]
-	if e == nil { // removed meanwhile
+	if e == nil || c.clients[id] != e { // removed (or replaced) meanwhile
 		c.mu.Unlock()
 		return st
 	}
