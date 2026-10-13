@@ -1113,3 +1113,24 @@ func TestLastStreamSurvivesTheNextDial(t *testing.T) {
 		cl.Close()
 	}
 }
+
+// Round 23: a stream was first judged a whole slowWindow after its first
+// data, so a device that replaced its stalled streams every two seconds
+// was never counted and held a window for each: 23 MiB with 64 streams. A
+// reader that has not started is counted after an eighth of the window.
+func TestStalledReaderIsCountedEarly(t *testing.T) {
+	slowLimits(t, 2*time.Second, 8)
+	dial := floodServer(t)
+	c := dial() // read one byte, then nothing
+	defer c.Close()
+	time.Sleep(700 * time.Millisecond)
+	if n := slowCount(); n != 1 {
+		t.Fatalf("%d streams counted as slow after 0.7 s of a 2 s window, want 1", n)
+	}
+}
+
+func TestConnWindowIsSet(t *testing.T) {
+	if connWindow <= int(maxSlow.Load())*streamWindow {
+		t.Fatalf("connWindow %d must be above maxSlow windows (%d), or the slow streams that are allowed stop the others", connWindow, int(maxSlow.Load())*streamWindow)
+	}
+}

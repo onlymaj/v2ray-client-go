@@ -170,6 +170,15 @@ func peek(conn net.Conn, buf []byte) (head []byte, domain string, err error) {
 	if n == 0 {
 		return nil, "", nil
 	}
+	// A ClientHello longer than buf, or in more pieces than are waited
+	// for, went unsniffed and missed its domain rule; one with a large
+	// session ticket or two post-quantum key shares can be that long
+	// (round 23). The name is taken if it is in what has arrived.
+	if domain == "" && buf[0] == 0x16 {
+		if dom, err := sniff.SNIPrefix(buf[:n]); err == nil {
+			domain = dom
+		}
+	}
 	// Copy out so the pooled buffer can be returned before the relay.
 	return append([]byte(nil), buf[:n]...), domain, nil
 }

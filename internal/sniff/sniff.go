@@ -44,7 +44,13 @@ func Sniff(b []byte) (domain, proto string, err error) {
 
 // SNI returns the server_name from a TLS ClientHello contained in the first
 // record of b. Only the first record is examined.
-func SNI(b []byte) (string, error) {
+func SNI(b []byte) (string, error) { return sni(b, false) }
+
+// SNIPrefix is SNI for a first record that is not complete and will not be
+// waited for: the name is returned if it lies within b.
+func SNIPrefix(b []byte) (string, error) { return sni(b, true) }
+
+func sni(b []byte, prefix bool) (string, error) {
 	if len(b) == 0 {
 		return "", ErrNeedMore
 	}
@@ -62,7 +68,10 @@ func SNI(b []byte) (string, error) {
 		return "", ErrNotTLS
 	}
 	if len(b) < 5+n {
-		return "", ErrNeedMore
+		if !prefix {
+			return "", ErrNeedMore
+		}
+		n = len(b) - 5
 	}
 	p := reader(b[5 : 5+n])
 	if t, ok := p.u8(); !ok || t != 1 { // client_hello

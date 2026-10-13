@@ -633,12 +633,28 @@ func (s *Server) putIdle(key string, c net.Conn, born time.Time, gen uint64) {
 		return
 	}
 	old, had := s.idle[key]
+	if !had && len(s.idle) >= maxIdleUpstreams {
+		// The key holds the rule, so a device that asked for names under
+		// every domain rule kept a proxied connection alive for each
+		// (round 23). The one unused for the longest goes.
+		var oldest string
+		for k, ic := range s.idle {
+			if oldest == "" || ic.since.Before(s.idle[oldest].since) {
+				oldest = k
+			}
+		}
+		old, had = s.idle[oldest], true
+		delete(s.idle, oldest)
+	}
 	s.idle[key] = idleConn{conn: c, since: time.Now(), born: born}
 	s.mu.Unlock()
 	if had {
 		old.conn.Close()
 	}
 }
+
+// maxIdleUpstreams bounds the pooled upstream connections over all routes.
+const maxIdleUpstreams = 16
 
 func (s *Server) reapIdle(ctx context.Context) {
 	t := time.NewTicker(s.opts.IdleTimeout)

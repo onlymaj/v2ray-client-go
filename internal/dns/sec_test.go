@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"sync/atomic"
@@ -765,4 +766,31 @@ func (c spyConn) Close() error {
 		})
 	}
 	return c.TCPConn.Close()
+}
+
+// Round 23: one upstream connection was pooled per route key with no bound
+// on the keys, and the key holds the rule: a device asking for names under
+// every domain rule kept a proxied connection alive for each.
+func TestIdleUpstreamsAreBounded(t *testing.T) {
+	s := &Server{idle: map[string]idleConn{}}
+	var theirs []net.Conn
+	for i := range maxIdleUpstreams + 5 {
+		a, b := net.Pipe()
+		theirs = append(theirs, b)
+		s.putIdle(fmt.Sprintf("rule%d", i), a, time.Now(), 0)
+		time.Sleep(time.Millisecond)
+	}
+	if n := len(s.idle); n != maxIdleUpstreams {
+		t.Fatalf("%d pooled upstream connections, want %d", n, maxIdleUpstreams)
+	}
+	if _, ok := s.idle["rule0"]; ok {
+		t.Fatal("the connection unused for the longest is still pooled")
+	}
+	theirs[0].SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := theirs[0].Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("the dropped connection was not closed: %v", err)
+	}
+	for _, ic := range s.idle {
+		ic.conn.Close()
+	}
 }

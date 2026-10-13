@@ -79,6 +79,14 @@ type Settings struct {
 // streamWindow per round trip (10 Mbit/s at 200 ms).
 const streamWindow = 256 << 10
 
+// connWindow is the receive window of a whole HTTP/2 connection (the
+// default is 1 GiB): what all its tunnels together may have unread. It is
+// above maxSlow windows, so that the slow streams that are allowed do not
+// stop the others. Streams are judged slow only after a while, and without
+// it a device that kept replacing stalled streams held a window for each
+// young one, 23 MiB with 64 streams (round 23).
+const connWindow = 12 << 20
+
 // maxHeaderList bounds the response headers and trailers of one stream.
 const maxHeaderList = 16 << 10
 
@@ -139,7 +147,7 @@ func New(settings []byte) (transport.Layer, error) {
 	// would pin 4 MiB per connection. ConfigureTransports is the only way to
 	// set the window; the http.Transport itself is never used.
 	t, err := http2.ConfigureTransports(&http.Transport{
-		HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow},
+		HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow, MaxReceiveBufferPerConnection: connWindow},
 		// Otherwise the transport asks for gzip and inflates a reply that
 		// claims it, which gRPC never does (round 19).
 		DisableCompression: true,
@@ -454,19 +462,21 @@ func (c *Client) closeIdle(cc *http2.ClientConn) {
 // maxDraining bounds, over all clients, the replaced connections that still
 // have tunnels. A server that allows one stream per connection gets a TLS
 // and HTTP/2 connection for every tunnel (round 21). Each replaced
-// connection carries at least one tunnel, and the inbound side accepts 256
-// conns, so there are never more than that many, each costing about what a
-// tunnel over WebSocket and TLS does. The bound is therefore above what the
-// inbound cap allows and only catches a fault in the bookkeeping. Lower
-// bounds all hurt someone: refusing new tunnels locked out clients whose
-// server retires connections with GOAWAY, as nginx does after 1000 requests
-// or an hour; closing the oldest, or one chosen by who holds tunnels on it,
-// let a LAN device that only made connections retire (short tunnels, opened
-// and closed) have other devices' long-lived tunnels cut (rounds 22 and
-// 23). If it is ever reached, the connection closed is one of the source
-// with tunnels on the most replaced connections, the one with the fewest
-// tunnels of other sources, the oldest first. A variable for tests.
-var maxDraining = 320
+// connection carries at least one tunnel, and tunnels come from the 256
+// inbound conns, 32 more that were evicted and are still closing, 64 DNS
+// queries in flight and a few health probes, so there are never more than
+// that many, each costing about what a tunnel over WebSocket and TLS does.
+// The bound is above that sum and only catches a fault in the bookkeeping.
+// Lower bounds all hurt someone: refusing new tunnels locked out clients
+// whose server retires connections with GOAWAY, as nginx does after 1000
+// requests or an hour; closing the oldest, or one chosen by who holds
+// tunnels on it, let a LAN device that only made connections retire (short
+// tunnels, opened and closed) have other devices' long-lived tunnels cut
+// (rounds 22 and 23). If it is ever reached, the connection closed is one
+// of the source with tunnels on the most replaced connections, the one with
+// the fewest tunnels of other sources, the oldest first. A variable for
+// tests.
+var maxDraining = 448
 
 type drained struct {
 	cc   *http2.ClientConn
@@ -724,15 +734,28 @@ type backlog struct {
 	start  time.Time     // start of the current window; zero before the first data
 	waited time.Duration // time in the window with data waiting for the reader
 	taken  int           // bytes the reader took in the window
+	judged bool          // the first window is over
 	timer  *time.Timer
+}
+
+// window is the length of the current window. The first is an eighth of
+// the others: a stream whose reader never starts is counted after 250 ms,
+// not after 2 s in which it was replaced by the next one (round 23).
+func (b *backlog) window() time.Duration {
+	w := time.Duration(slowWindow.Load())
+	if !b.judged {
+		w /= 8
+	}
+	return w
 }
 
 // judge closes the window if it is over and starts the next one.
 func (b *backlog) judge(s *streamConn, now time.Time) {
 	elapsed := now.Sub(b.start)
-	if elapsed < time.Duration(slowWindow.Load()) {
+	if elapsed < b.window() {
 		return
 	}
+	b.judged = true
 	s.setSlow(b.waited*2 >= elapsed && int64(b.taken)*int64(time.Second) < slowFloor*int64(elapsed))
 	b.start, b.waited, b.taken = now, 0, 0
 }
@@ -761,7 +784,7 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 	s.blocked.Store(true)
 	defer s.blocked.Store(false)
 	for {
-		left := max(time.Duration(slowWindow.Load())-now.Sub(b.start), time.Millisecond)
+		left := max(b.window()-now.Sub(b.start), time.Millisecond)
 		if b.timer == nil {
 			b.timer = time.NewTimer(left)
 		} else {

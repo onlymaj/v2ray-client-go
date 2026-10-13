@@ -1,6 +1,7 @@
 package sniff
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"io"
@@ -110,5 +111,28 @@ func BenchmarkSNI(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		SNI(hello)
+	}
+}
+
+// Round 23: a ClientHello longer than the 4 KiB that are sniffed was never
+// parsed, so its connection missed the domain rules. The name is found in
+// a record that is cut short, if it lies before the cut.
+func TestSNIPrefix(t *testing.T) {
+	hello := clientHello(t, "www.example.com")
+	if _, err := SNI(hello[:len(hello)-1]); err != ErrNeedMore {
+		t.Fatalf("SNI of an incomplete record: %v, want ErrNeedMore", err)
+	}
+	at := bytes.Index(hello, []byte("www.example.com"))
+	if at < 0 {
+		t.Fatal("no name in the hello")
+	}
+	end := at + len("www.example.com")
+	if got, err := SNIPrefix(hello[:end]); err != nil || got != "www.example.com" {
+		t.Fatalf("name within the prefix: %q, %v", got, err)
+	}
+	for _, cut := range []int{6, 44, at, end - 1} {
+		if got, err := SNIPrefix(hello[:cut]); err == nil {
+			t.Fatalf("prefix of %d bytes gave %q, want an error", cut, got)
+		}
 	}
 }
