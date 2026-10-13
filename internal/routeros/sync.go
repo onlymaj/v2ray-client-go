@@ -211,7 +211,9 @@ func (s *Syncer) Run(ctx context.Context) {
 				if err != nil {
 					syncFails++
 					nextSync = time.Now().Add(s.backoff(syncFails))
-					s.opts.Logf("routeros: sync failed (retry in %s): %v", s.backoff(syncFails), err)
+					// One short line: a reply that cannot be parsed is quoted
+					// whole in the error, 60 KB (round 23).
+					s.opts.Logf("routeros: sync failed (retry in %s): %s", s.backoff(syncFails), clean(err.Error()))
 				} else {
 					syncFails = 0
 					appliedKey = key

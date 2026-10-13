@@ -287,3 +287,49 @@ func TestOpenDoesNotMergeIntoTheDefaults(t *testing.T) {
 		t.Fatalf("config from a file with settings only: %+v", c)
 	}
 }
+
+// Round 23: rules saved as null (PUT /api/rules with the body "null") ran
+// as "no rules", and after a restart Open took the missing list for "use
+// the default": the routing changed without a save, or the start failed
+// when the default group was gone.
+func TestNullListsAreNotSaved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(func(c *Config) error { c.Rules, c.Groups = nil, nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if bytes.Contains(data, []byte("null")) {
+		t.Fatalf("the saved config holds null: %s", data)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := s.Get(); len(c.Rules) != 0 || len(c.Groups) != 0 {
+		t.Fatalf("after reopening: %d rules, %d groups, want none", len(c.Rules), len(c.Groups))
+	}
+}
+
+// Round 23: Update released its lock by hand on every path, so a panic in
+// the callback left it held and every later Get waiting.
+func TestUpdateReleasesTheLockOnPanic(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	func() {
+		defer func() { recover() }()
+		s.Update(func(*Config) error { panic("in the callback") })
+	}()
+	got := make(chan *Config, 1)
+	go func() { got <- s.Get() }()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Get blocks after a panic in Update's callback")
+	}
+}

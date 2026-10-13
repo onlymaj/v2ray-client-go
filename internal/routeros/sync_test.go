@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -658,5 +659,53 @@ func TestReconcileEndsWhenSettingsChangedBeforeIt(t *testing.T) {
 	_, err := s.reconcile(context.Background(), newClient(srv.URL, "u", "p", srv.Client()), "no-proxy", []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}, true, base)
 	if !errors.Is(err, errSettingsChanged) || writes.Load() > 1 {
 		t.Fatalf("%d writes, err %v", writes.Load(), err)
+	}
+}
+
+// Round 23: a reply that net/http cannot parse is quoted whole in its
+// error, and the "sync failed" log line carried it uncut: 60 KB a line,
+// every pass, written by whoever answers at the URL.
+func TestSyncFailureLogIsOneShortLine(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				c.Read(make([]byte, 4096))
+				c.Write([]byte(strings.Repeat("\x01\x1b[31m", 3000) + "\r\n\r\n"))
+			}()
+		}
+	}()
+	var mu sync.Mutex
+	var logs []string
+	s := New(Options{Logf: func(format string, args ...any) {
+		mu.Lock()
+		logs = append(logs, fmt.Sprintf(format, args...))
+		mu.Unlock()
+	}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	s.SetConfig(true, "http://"+ln.Addr().String(), "admin", "secret", "no-proxy", "")
+	waitFor(t, "failed sync", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.ContainsFunc(logs, func(l string) bool { return strings.Contains(l, "sync failed") })
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	for _, l := range logs {
+		if len(l) > 400 || strings.ContainsAny(l, "\x01\x1b\n") {
+			t.Fatalf("log line of %d bytes: %.120q", len(l), l)
+		}
 	}
 }

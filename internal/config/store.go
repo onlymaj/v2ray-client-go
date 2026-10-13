@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/onlymaj/v2ray-client-go/internal/group"
+	"github.com/onlymaj/v2ray-client-go/internal/router"
 )
 
 // Store owns the config. Readers get an immutable snapshot; writers go
@@ -106,26 +109,9 @@ func (s *Store) Get() *Config {
 // Update runs fn on a deep copy, validates the result, writes it to disk
 // and then publishes it. If fn or validation fails nothing changes.
 func (s *Store) Update(fn func(*Config) error) error {
-	s.mu.Lock()
-	next, err := clone(s.cur)
-	if err != nil {
-		s.mu.Unlock()
+	if err := s.replace(fn); err != nil {
 		return err
 	}
-	if err := fn(next); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	if err := next.Validate(); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	if err := s.write(next); err != nil {
-		s.mu.Unlock()
-		return err
-	}
-	s.cur = next
-	s.mu.Unlock()
 
 	// Notify one update at a time, always with the latest snapshot: two
 	// overlapping Updates may reach this point in either order, and the last
@@ -139,6 +125,44 @@ func (s *Store) Update(fn func(*Config) error) error {
 	for _, f := range subs {
 		f(cur)
 	}
+	return nil
+}
+
+// replace is the locked part of Update. The lock is released by defer: a
+// panic in fn would otherwise leave it held and every later request
+// waiting on Get (round 23).
+func (s *Store) replace(fn func(*Config) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next, err := clone(s.cur)
+	if err != nil {
+		return err
+	}
+	if err := fn(next); err != nil {
+		return err
+	}
+	// Never null in the file: Open takes a missing list for "use the
+	// default", so rules saved as null came back as the default rule
+	// after a restart, or stopped it (round 23).
+	if next.Clients == nil {
+		next.Clients = []Client{}
+	}
+	if next.Groups == nil {
+		next.Groups = []group.Group{}
+	}
+	if next.Rules == nil {
+		next.Rules = []router.Rule{}
+	}
+	if next.Subscriptions == nil {
+		next.Subscriptions = []Subscription{}
+	}
+	if err := next.Validate(); err != nil {
+		return err
+	}
+	if err := s.write(next); err != nil {
+		return err
+	}
+	s.cur = next
 	return nil
 }
 
@@ -178,7 +202,17 @@ func (s *Store) write(c *Config) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.path)
+	if err := os.Rename(tmp.Name(), s.path); err != nil {
+		return err
+	}
+	// Make the rename last through a power cut, so a save the UI confirmed
+	// is not undone. Not every filesystem can sync a directory; the save
+	// has happened either way.
+	if d, err := os.Open(dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
 }
 
 func clone(c *Config) (*Config, error) {
