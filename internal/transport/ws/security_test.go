@@ -142,3 +142,22 @@ func TestReadHandshake(t *testing.T) {
 		}
 	}
 }
+
+// Round 25: a pooled early-data conn that the server had closed (Xray does
+// after 4 s without a request) failed in the handshake, which counts as
+// "the early data may have been delivered", so a plaintext first payload
+// was not sent again and the connection failed. The closed conn is found
+// before anything is sent, and that error allows a retry.
+func TestDeadPooledConnIsFoundBeforeEarlyData(t *testing.T) {
+	a, b := net.Pipe()
+	b.Close()
+	d := &delayConn{Conn: a, l: &layer{ed: 2048}, dialed: make(chan struct{})}
+	_, err := d.Write([]byte("GET / HTTP/1.1\r\n\r\n"))
+	if err == nil {
+		t.Fatal("Write succeeded on a conn the server closed")
+	}
+	var ed interface{ MayBeDelivered() bool }
+	if errors.As(err, &ed) {
+		t.Fatalf("%v is marked as possibly delivered; nothing was sent", err)
+	}
+}

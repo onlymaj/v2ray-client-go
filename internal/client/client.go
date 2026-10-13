@@ -280,8 +280,8 @@ func (c *Client) Dial(ctx context.Context, network string, dest outbound.Addr) (
 	if err != nil {
 		return c.probe.Dial(ctx, network, dest)
 	}
-	return newRetryConn(conn, func() (net.Conn, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+	return newRetryConn(conn, func(ctx context.Context) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(ctx, dialTimeout)
 		defer cancel()
 		return c.probe.Dial(ctx, network, dest)
 	}), nil

@@ -853,13 +853,32 @@ func (s *streamConn) setSlow(slow bool) {
 			// a moment, and it must not cost the device its paused video
 			// (round 24). When none has been slow that long, the newest:
 			// the one that has just made the list too long.
+			//
+			// When several sources hold the most, the one whose stream
+			// has just been added pays: otherwise a device with a few
+			// addresses, each with as many stalled streams as another
+			// device has paused ones, had that device's oldest cut
+			// (round 25).
+			top := func(o *streamConn) bool { return count[o.src] == most }
+			if count[s.src] == most {
+				top = func(o *streamConn) bool { return o.src == s.src }
+			}
 			hold := time.Since(slowBase) - time.Duration(slowHold)*time.Duration(slowWindow.Load())
 			i := slices.IndexFunc(slowList, func(o *streamConn) bool {
-				return count[o.src] == most && o.blocked.Load() && o.slowSince <= hold
+				return top(o) && o.blocked.Load() && o.slowSince <= hold
 			})
 			if i < 0 {
+				// A stream that has resumed pins nothing; s itself is
+				// about to wait.
 				for j, o := range slowList {
-					if count[o.src] == most {
+					if top(o) && (o == s || o.blocked.Load()) {
+						i = j
+					}
+				}
+			}
+			if i < 0 {
+				for j, o := range slowList {
+					if top(o) {
 						i = j
 					}
 				}
@@ -943,7 +962,7 @@ type streamConn struct {
 	slowSince time.Duration
 	src       string // whose stream this is, for the slow-reader cap
 	// For setSlow, about another stream: readLoop is in deliver waiting
-	// for the reader, and when (unix nanoseconds) deliver last ran.
+	// for the reader, and when (time since slowBase) deliver last ran.
 	blocked atomic.Bool
 	last    atomic.Int64
 	ended   bool // cut closed; guarded by slowMu

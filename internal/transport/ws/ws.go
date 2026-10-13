@@ -461,16 +461,50 @@ type delayConn struct {
 	ws     *Conn
 	err    error
 	rdl    deadline // read deadline while waiting for the handshake
+
+	dlMu sync.Mutex
+	rdlT time.Time // the caller's read deadline, put back after probe
 }
 
 func (d *delayConn) SetDeadline(t time.Time) error {
 	d.rdl.set(t)
+	d.dlMu.Lock()
+	d.rdlT = t
+	d.dlMu.Unlock()
 	return d.Conn.SetDeadline(t)
 }
 
 func (d *delayConn) SetReadDeadline(t time.Time) error {
 	d.rdl.set(t)
+	d.dlMu.Lock()
+	d.rdlT = t
+	d.dlMu.Unlock()
 	return d.Conn.SetReadDeadline(t)
+}
+
+// probe looks whether the server has closed the conn while it waited in
+// the pool, before anything is sent on it. Xray's WebSocket server closes
+// a conn that sends no request within 4 s, and conns wait in the pool for
+// up to 30 s: most warm conns of a quiet client are dead. Found here, the
+// failure is a plain error and the caller may dial again; found by the
+// handshake, it is an earlyDataError, and a plaintext first payload is
+// then not sent again, so every such connection failed (round 25).
+func (d *delayConn) probe() error {
+	d.Conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+	var b [1]byte
+	n, err := d.Conn.Read(b[:])
+	d.dlMu.Lock()
+	t := d.rdlT
+	d.dlMu.Unlock()
+	d.Conn.SetReadDeadline(t)
+	if n > 0 {
+		return errors.New("ws: data from the server before the handshake")
+	}
+	var ne net.Error
+	if err == nil || errors.As(err, &ne) && ne.Timeout() {
+		return nil
+	}
+	return fmt.Errorf("ws: pooled conn is closed: %w", err)
 }
 
 func (d *delayConn) Write(p []byte) (int, error) {
@@ -487,6 +521,10 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		defer cancel()
 		stop := context.AfterFunc(ctx, func() { d.Conn.Close() })
 		defer stop()
+		if d.err = d.probe(); d.err != nil {
+			close(d.dialed)
+			return
+		}
 		d.ws, d.err = d.l.handshake(context.Background(), d.Conn, ed)
 		if d.err != nil && ed != nil {
 			d.err = earlyDataError{d.err}

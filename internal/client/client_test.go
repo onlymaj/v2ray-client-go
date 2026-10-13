@@ -339,7 +339,7 @@ func TestRetryReplayPolicy(t *testing.T) {
 			old := &scriptConn{data: []byte(tc.received), readErr: io.EOF}
 			fresh := &scriptConn{data: []byte("reply"), readErr: io.EOF}
 			dials := 0
-			rc := newRetryConn(old, func() (net.Conn, error) { dials++; return fresh, nil })
+			rc := newRetryConn(old, func(context.Context) (net.Conn, error) { dials++; return fresh, nil })
 			for _, w := range tc.writes {
 				if _, err := rc.Write(w); err != nil {
 					t.Fatal(err)
@@ -389,7 +389,7 @@ func TestRetryWriteFailurePolicy(t *testing.T) {
 			old := &scriptConn{writeErr: syscall.ECONNRESET}
 			fresh := &scriptConn{}
 			dials := 0
-			rc := newRetryConn(old, func() (net.Conn, error) { dials++; return fresh, nil })
+			rc := newRetryConn(old, func(context.Context) (net.Conn, error) { dials++; return fresh, nil })
 			if _, err := rc.Write(tc.first); err != nil {
 				t.Fatal(err)
 			}
@@ -414,7 +414,7 @@ func TestRetryWriteFailurePolicy(t *testing.T) {
 func TestRetryConnCloseDuringStuckWrite(t *testing.T) {
 	a, b := net.Pipe() // nothing reads b: Writes on a block
 	defer b.Close()
-	r := newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	r := newRetryConn(a, func(context.Context) (net.Conn, error) { return nil, net.ErrClosed })
 	wrote := make(chan error, 1)
 	go func() { _, err := r.Write([]byte("GET / HTTP/1.1\r\n")); wrote <- err }()
 	time.Sleep(50 * time.Millisecond)
@@ -444,14 +444,14 @@ func TestRetryConnKeepsOnlyWhatItCouldReplay(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 	go io.Copy(io.Discard, b)
-	r := newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	r := newRetryConn(a, func(context.Context) (net.Conn, error) { return nil, net.ErrClosed })
 	if _, err := r.Write([]byte("GET / HTTP/1.1\r\n")); err != nil {
 		t.Fatal(err)
 	}
 	if r.armed.Load() || r.sent != nil {
 		t.Fatalf("armed %v with %d bytes kept after a write that is not a TLS handshake", r.armed.Load(), len(r.sent))
 	}
-	r = newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	r = newRetryConn(a, func(context.Context) (net.Conn, error) { return nil, net.ErrClosed })
 	hello := append([]byte{0x16, 0x03, 0x01, 0x00, 0x04}, 1, 2, 3, 4)
 	if _, err := r.Write(hello); err != nil {
 		t.Fatal(err)
@@ -488,7 +488,7 @@ func TestRetryConnCarriesDeadlinesToTheNewConn(t *testing.T) {
 	defer b.Close()
 	go io.Copy(io.Discard, b)
 	redialing := make(chan struct{})
-	r := newRetryConn(&failFirst{err: syscall.ECONNRESET}, func() (net.Conn, error) {
+	r := newRetryConn(&failFirst{err: syscall.ECONNRESET}, func(context.Context) (net.Conn, error) {
 		close(redialing)
 		time.Sleep(200 * time.Millisecond)
 		return a, nil
@@ -538,7 +538,7 @@ func TestRetryFirstWriteFailurePolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh := &scriptConn{}
 			dials := 0
-			rc := newRetryConn(&failFirst{err: tc.err}, func() (net.Conn, error) { dials++; return fresh, nil })
+			rc := newRetryConn(&failFirst{err: tc.err}, func(context.Context) (net.Conn, error) { dials++; return fresh, nil })
 			_, err := rc.Write(tc.p)
 			if replayed := dials == 1 && err == nil && string(fresh.wrote) == string(tc.p); replayed != tc.replay {
 				t.Fatalf("dials=%d err=%v wrote %d bytes; want replay %v", dials, err, len(fresh.wrote), tc.replay)
@@ -547,5 +547,26 @@ func TestRetryFirstWriteFailurePolicy(t *testing.T) {
 				t.Fatalf("redialed %d times", dials)
 			}
 		})
+	}
+}
+
+// Round 25: a redial in progress ignored Close, so a DNS query whose time
+// was up held its upstream slot until the dial gave up, 10 s later.
+func TestRetryConnCloseEndsTheRedial(t *testing.T) {
+	r := newRetryConn(&failFirst{err: syscall.ECONNRESET}, func(ctx context.Context) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	done := make(chan error, 1)
+	go func() { _, err := r.Write(clientHello); done <- err }()
+	time.Sleep(50 * time.Millisecond)
+	r.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Write succeeded on a closed conn")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the redial outlives Close")
 	}
 }

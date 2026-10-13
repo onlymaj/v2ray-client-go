@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"net"
 	"sync"
@@ -26,7 +27,12 @@ const retryLimit = 4 << 10
 // harmless: nothing, or only complete TLS handshake records (a ClientHello). Replaying a plaintext request such as an HTTP
 // POST could run it twice at the destination.
 type retryConn struct {
-	redial func() (net.Conn, error)
+	redial func(context.Context) (net.Conn, error)
+	// ctx ends with Close, so a redial in progress does too: a DNS query
+	// that had timed out kept its upstream slot until the dial gave up,
+	// 10 s later (round 25).
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu    sync.Mutex // held during armed Writes and the redial
 	armed atomic.Bool
@@ -43,8 +49,9 @@ type retryConn struct {
 	hasRdl, hasWdl bool
 }
 
-func newRetryConn(c net.Conn, redial func() (net.Conn, error)) *retryConn {
+func newRetryConn(c net.Conn, redial func(context.Context) (net.Conn, error)) *retryConn {
 	r := &retryConn{cur: c, redial: redial}
+	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.armed.Store(true)
 	return r
 }
@@ -72,7 +79,7 @@ func (r *retryConn) retryLocked(old net.Conn) error {
 	if closed {
 		return net.ErrClosed
 	}
-	nc, err := r.redial()
+	nc, err := r.redial(r.ctx)
 	if err != nil {
 		return err
 	}
@@ -203,6 +210,7 @@ func (r *retryConn) Close() error {
 	r.closed = true
 	c := r.cur
 	r.st.Unlock()
+	r.cancel()
 	return c.Close()
 }
 
