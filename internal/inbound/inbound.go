@@ -26,13 +26,15 @@ type Handler interface {
 const handshakeTimeout = 10 * time.Second
 
 // Open connection limits shared by every inbound (vars so tests can lower
-// them). maxConns is sized for GOMEMLIMIT=32MiB: a relayed conn costs about
-// 75 KB while data flows both ways over TLS (two goroutines, two 16 KB copy
-// buffers, 8-16 KB of protocol buffers, about 33 KB of outbound TLS state),
-// measured in round 20, and about 47 KB while idle (the copy buffers are
-// then 2 KB each, unless the last read was nearly a full large one). 512 idle conns are about 24 MB; 512 busy ones do not fit
-// and lean on the collector. Sources are counted per IPv4 address and
-// per IPv6 /64, so privacy addresses don't multiply the per-source cap.
+// them). maxConns is sized for GOMEMLIMIT=32MiB beside config.MaxClients.
+// Measured after round 21 on amd64, heap and stacks per relayed conn that
+// is idle: 19 KB direct, 59-72 KB for VLESS over TLS, Reality, WebSocket or
+// gRPC, 87-95 KB for VMess; 70-100 KB once it has carried a large
+// download; up to 115 KB when both directions wait with the large copy
+// buffer. 256 conns are then 15-26 MB, and 29 MB in the worst case, which
+// with the clients' share does not fit and leans on the collector. Sources
+// are counted per IPv4 address and per IPv6 /64, so privacy addresses
+// don't multiply the per-source cap.
 //
 // When the global cap is full, a new conn from a source below its fair
 // share (maxConns / active sources, the new source included) evicts the
@@ -48,8 +50,8 @@ const handshakeTimeout = 10 * time.Second
 // until the handler returns, and nothing more is evicted while maxDraining
 // handlers are in that state. Handlers never exceed maxConns + maxDraining.
 var (
-	maxConns      = 512
-	maxConnsPerIP = 128
+	maxConns      = 256
+	maxConnsPerIP = 64
 	maxDraining   = 32
 )
 

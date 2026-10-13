@@ -150,9 +150,10 @@ func TestSubscriptionCap(t *testing.T) {
 func TestSubscriptionOverClientLimitIsRecorded(t *testing.T) {
 	e := newEnv(t)
 	e.login()
-	e.expect("POST", "/api/import", map[string]string{"text": manyLinks(t, 600)}, 200, nil)
+	n := config.MaxClients*6/10 // two of these do not fit together
+	e.expect("POST", "/api/import", map[string]string{"text": manyLinks(t, n)}, 200, nil)
 	var b strings.Builder
-	for i := range 600 {
+	for i := range n {
 		b.WriteString(link(t, "n", fmt.Sprintf("s%d.example", i), 443, u1) + "\n")
 	}
 	e.setSub("http://sub.example/more", b.String())
@@ -161,7 +162,7 @@ func TestSubscriptionOverClientLimitIsRecorded(t *testing.T) {
 	if !strings.Contains(sub.LastError, "too many clients") || sub.LastUpdate == "" || sub.Count != 0 {
 		t.Fatalf("sub %+v", sub)
 	}
-	if cfg := e.store.Get(); len(cfg.Clients) != 600 || len(cfg.Subscriptions) != 1 || cfg.Subscriptions[0].LastError == "" {
+	if cfg := e.store.Get(); len(cfg.Clients) != n || len(cfg.Subscriptions) != 1 || cfg.Subscriptions[0].LastError == "" {
 		t.Fatalf("%d clients, subscriptions %+v", len(cfg.Clients), cfg.Subscriptions)
 	}
 }

@@ -99,7 +99,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 | GET | `/api/subscriptions` | — | `[Subscription]` |
 | POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. |
 | DELETE | `/api/subscriptions/:id` | — | `204`. The server also deletes the clients that came from this subscription, with the same cleanup as `DELETE /api/clients/:id`. |
-| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. The same goes for a subscription whose clients do not fit the config (over the limit of 1000 clients, for one): nothing changes and `lastError` says why. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
+| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. The same goes for a subscription whose clients do not fit the config (over the limit of 250 clients, for one): nothing changes and `lastError` says why. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
 
 ## Groups
 
@@ -205,6 +205,6 @@ The server serves `web/dist` at `/`, with `index.html` as the fallback for `/`. 
 - `403` on any `/api/*` request whose `Host` header is not an IP literal, `localhost`, or a name listed in the `UI_HOSTS` env var (DNS-rebinding guard), and on mutating requests whose `Origin` host differs from `Host`.
 - `415` on POST/PUT/DELETE without `Content-Type: application/json`.
 - `429` (with `Retry-After`) from `POST /api/login`: more than one login in flight per IP, more than 5 attempts per IP per minute, or more than 30 attempts per minute across all IPs.
-- `400` from `POST /api/import` with more than 1000 links; the config holds at most 1000 clients in total.
+- `400` from `POST /api/import` with more than 1000 links; the config holds at most 250 clients in total, and a save that would pass that is refused with `400`.
 - Changing `settings.routeros.url` or `user` without sending a new password clears the stored password.
 - Sessions are bound to the client IP that logged in (a request with the cookie from another IP gets `401`) and expire after 12 hours without use, or 7 days after login at the latest.

@@ -12,8 +12,11 @@ import (
 )
 
 // MaxClients caps the number of clients so a malicious subscription or
-// import can't exhaust the router's memory.
-const MaxClients = 1000
+// import can't exhaust the router's memory. A client costs about 6 KB, and
+// 18 KB more of traffic and delay history once it has been used: 250 are
+// up to 6.5 MiB of GOMEMLIMIT=32MiB, and 1000 were 23 to 26 MiB, which left
+// no room for the connections (measured after round 21).
+const MaxClients = 250
 
 // MaxMemberships bounds the members of all groups together. Each costs
 // about 150 bytes across the config and the dispatcher: 200 groups of 1000
