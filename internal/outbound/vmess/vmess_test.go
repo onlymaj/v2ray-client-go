@@ -376,8 +376,8 @@ func TestClientAgainstFakeServer(t *testing.T) {
 			cc := c.(*clientConn)
 			cc.wmu.Lock()
 			cc.rmu.Lock()
-			if cc.rbuf != nil || cc.leftover != nil || cap(cc.wbuf) > 2048 {
-				t.Errorf("idle conn holds rbuf %d, leftover %d, wbuf %d bytes", cap(cc.rbuf), cap(cc.leftover), cap(cc.wbuf))
+			if cc.rbuf != nil || cc.leftover != nil {
+				t.Errorf("idle conn holds rbuf %d, leftover %d bytes", cap(cc.rbuf), cap(cc.leftover))
 			}
 			cc.rmu.Unlock()
 			cc.wmu.Unlock()

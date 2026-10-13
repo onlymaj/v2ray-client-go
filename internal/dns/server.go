@@ -575,20 +575,21 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	for {
-		resp, err := readMsg(c, maxAnswer)
-		if err != nil {
-			return nil, err
-		}
-		if answers(query, q, resp) {
-			if !stop() {
-				return nil, ctx.Err() // c was closed; don't reuse it
-			}
-			c.SetDeadline(time.Time{})
-			return resp, nil
-		}
-		// A stale answer to an earlier, timed-out query: skip it.
+	resp, err := readMsg(c, maxAnswer)
+	if err != nil {
+		return nil, err
 	}
+	// A connection whose query timed out is closed, never pooled, so no
+	// answer to an earlier query can be waiting on c: anything else than
+	// the answer is the upstream misbehaving.
+	if !answers(query, q, resp) {
+		return nil, errors.New("dns: the upstream's reply does not answer the query")
+	}
+	if !stop() {
+		return nil, ctx.Err() // c was closed; don't reuse it
+	}
+	c.SetDeadline(time.Time{})
+	return resp, nil
 }
 
 // answers reports whether resp is a response to query: same ID and the

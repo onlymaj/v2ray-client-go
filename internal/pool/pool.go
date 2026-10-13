@@ -17,6 +17,7 @@ package pool
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -71,31 +72,68 @@ func New(dial func(ctx context.Context) (net.Conn, error)) *Pool {
 // Get returns a warm conn if one is fresh (reused = true), otherwise dials
 // a new one.
 func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
-	p.mu.Lock()
-	now := p.now()
-	busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
-	p.lastGet = now
-	before := len(p.idle)
-	for len(p.idle) > 0 && c == nil {
-		e := p.idle[len(p.idle)-1] // newest
-		p.idle = p.idle[:len(p.idle)-1]
-		if now.Sub(e.at) < p.ttl {
-			c = e.c
-		} else {
-			e.c.Close()
+	for first := true; ; first = false {
+		p.mu.Lock()
+		now := p.now()
+		if first {
+			busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
+			p.lastGet = now
+			defer func() {
+				p.mu.Lock()
+				if busy && !p.closed && !p.filling && len(p.idle) < p.max {
+					p.filling = true
+					go p.fill()
+				}
+				p.mu.Unlock()
+			}()
 		}
-	}
-	warm.Add(int32(len(p.idle) - before))
-	if busy && !p.closed && !p.filling && len(p.idle) < p.max {
-		p.filling = true
-		go p.fill()
-	}
-	p.mu.Unlock()
-	if c != nil {
-		return c, true, nil
+		before := len(p.idle)
+		var age time.Duration
+		for c = nil; len(p.idle) > 0 && c == nil; {
+			e := p.idle[len(p.idle)-1] // newest
+			p.idle = p.idle[:len(p.idle)-1]
+			if age = now.Sub(e.at); age < p.ttl {
+				c = e.c
+			} else {
+				e.c.Close()
+			}
+		}
+		warm.Add(int32(len(p.idle) - before))
+		p.mu.Unlock()
+		if c == nil {
+			break
+		}
+		if age < probeAfter || alive(c) {
+			return c, true, nil
+		}
+		c.Close()
 	}
 	c, err = p.dial(ctx)
 	return c, false, err
+}
+
+// probeAfter is how long a conn must have waited before Get looks whether
+// the server has closed it.
+const probeAfter = time.Second
+
+// alive reports whether an idle conn is still open: a read of a
+// millisecond finds nothing and times out. A server may close a conn that
+// sends nothing for a few seconds (older Xray and v2fly after 4 s, a CDN),
+// and the first Write on it still succeeds. The caller's retry does not
+// send a plaintext request a second time, so every such connection failed:
+// the first plain HTTP or SSH connection after a quiet moment (round 26).
+// A conn that has data is not what was left here and is not used either.
+func alive(c net.Conn) bool {
+	if c.SetReadDeadline(time.Now().Add(time.Millisecond)) != nil {
+		return false
+	}
+	var b [1]byte
+	n, err := c.Read(b[:])
+	var ne net.Error
+	if n != 0 || !errors.As(err, &ne) || !ne.Timeout() {
+		return false
+	}
+	return c.SetReadDeadline(time.Time{}) == nil
 }
 
 // fill dials until the pool holds max conns, the client goes quiet, or a

@@ -155,7 +155,6 @@ type clientConn struct {
 	wmu     sync.Mutex
 	header  []byte // pending request header; nil once sent
 	enc     *chunkCodec
-	wbuf    []byte
 	wclosed bool
 
 	rmu      sync.Mutex
@@ -317,13 +316,13 @@ func (c *clientConn) CloseWrite() error {
 	}
 	c.wclosed = true
 	if c.enc != nil {
-		var err error
-		if c.wbuf, err = c.enc.seal(append(c.wbuf[:0], c.header...), nil); err != nil {
+		last, err := c.enc.seal(append([]byte(nil), c.header...), nil)
+		if err != nil {
 			c.Conn.Close()
 			return err
 		}
 		c.header = nil
-		if _, err := c.Conn.Write(c.wbuf); err != nil {
+		if _, err := c.Conn.Write(last); err != nil {
 			return err
 		}
 	} else if err := c.flushHeaderLocked(); err != nil {

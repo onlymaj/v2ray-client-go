@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -238,5 +239,45 @@ func TestWarmLimitHoldsWithSlowDials(t *testing.T) {
 	}
 	if n := warm.Load(); n != 0 {
 		t.Fatalf("counter is %d after closing every pool", n)
+	}
+}
+
+// Round 26: a warm conn the server had closed while it waited was handed
+// out. The first Write on it succeeds, and the caller does not send a
+// plaintext request a second time, so the first plain HTTP or SSH
+// connection after a quiet moment failed. Get looks first.
+func TestGetSkipsAConnTheServerClosed(t *testing.T) {
+	var mu sync.Mutex
+	var theirs []net.Conn
+	p := New(func(context.Context) (net.Conn, error) {
+		a, b := net.Pipe()
+		mu.Lock()
+		theirs = append(theirs, b)
+		mu.Unlock()
+		return a, nil
+	})
+	clk := &clock{t: time.Unix(1000, 0)}
+	p.now = clk.now
+	defer p.Close()
+	ctx := context.Background()
+	p.Get(ctx)
+	clk.add(time.Second)
+	p.Get(ctx) // busy: fills to two warm conns
+	waitFor(t, func() bool { return p.Len() == 2 })
+	clk.add(5 * time.Second)
+	mu.Lock()
+	theirs[len(theirs)-1].Close() // the newest warm conn, which Get takes first
+	mu.Unlock()
+
+	c, reused, err := p.Get(ctx)
+	if err != nil || !reused {
+		t.Fatalf("reused %v, err %v; want the other warm conn", reused, err)
+	}
+	c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 1)); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("Get handed out the closed conn (read: %v)", err)
+	}
+	if w := int(warm.Load()); w != p.Len() {
+		t.Fatalf("warm counter %d, pool holds %d", w, p.Len())
 	}
 }

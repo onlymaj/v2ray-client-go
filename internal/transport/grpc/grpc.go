@@ -330,7 +330,9 @@ func (g *guardConn) Write(p []byte) (int, error) {
 }
 
 // Wrap runs a single tunnel on its own HTTP/2 connection over conn.
-// Closing the returned conn closes conn.
+// Closing the returned conn closes conn. It is here for transport.Layer:
+// the client always uses DialStream, and Wrap has none of its accounting
+// (idle, replaced and slow connections per source).
 func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	cc, err := c.t.NewClientConn(&guardConn{Conn: conn})
 	if err != nil {
@@ -713,11 +715,10 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 // stalling and then taking a few pieces in a burst does not escape.
 //
 // At most maxSlow streams may be slow at once (about 9 MiB: a window plus a
-// readStep piece or two each). When one more turns slow, a stream is ended:
-// the one slow for the longest among those of the source (LAN device, see
-// transport.WithSource) that has the most slow streams. A device holding
-// many slow streams loses its own, and cannot have another device's paused
-// download cut. Readers above the floor are not limited; what they can pin
+// readStep piece or two each). When one more turns slow, a stream is ended,
+// one of the source (LAN device, see transport.WithSource) that has the
+// most slow streams; setSlow says which. A device holding many slow streams
+// loses its own, and cannot have another device's paused download cut. Readers above the floor are not limited; what they can pin
 // is bounded by the bandwidth they really use (about one second of it).
 const slowFloor = streamWindow // bytes per second
 
