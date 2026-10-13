@@ -438,6 +438,15 @@ func (c *Conn) Close() error {
 	return c.Conn.Close()
 }
 
+// earlyDataError is a failed handshake whose request carried early data.
+// The server may have taken the request and passed the data on before the
+// failure, so a caller must not send that data again on another connection
+// unless twice does no harm (round 24).
+type earlyDataError struct{ error }
+
+func (e earlyDataError) Unwrap() error      { return e.error }
+func (earlyDataError) MayBeDelivered() bool { return true }
+
 // earlyDataTimeout bounds the handshake deferred to the first Write.
 const earlyDataTimeout = 15 * time.Second
 
@@ -479,6 +488,9 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		stop := context.AfterFunc(ctx, func() { d.Conn.Close() })
 		defer stop()
 		d.ws, d.err = d.l.handshake(context.Background(), d.Conn, ed)
+		if d.err != nil && ed != nil {
+			d.err = earlyDataError{d.err}
+		}
 		wrote = d.err == nil && ed != nil
 		close(d.dialed)
 	})

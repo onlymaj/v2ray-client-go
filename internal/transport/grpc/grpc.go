@@ -734,6 +734,14 @@ func init() {
 	maxSlow.Store(32)
 }
 
+// slowHold is how many windows a stream must have been listed before it is
+// the one ended for its source. A variable for tests.
+var slowHold = 8
+
+// slowBase is the origin of the times kept for the slow streams. They are
+// monotonic: the router's wall clock steps when NTP first answers.
+var slowBase = time.Now()
+
 var errStalled = errors.New("grpc: stream ended: its reader is too slow and too many streams are waiting for their readers")
 
 // backlog is readLoop's record of how its reader keeps up.
@@ -762,7 +770,7 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 	default:
 	}
 	now := time.Now()
-	s.last.Store(now.UnixNano())
+	s.last.Store(int64(now.Sub(slowBase)))
 	if b.start.IsZero() {
 		b.start = now
 	}
@@ -788,7 +796,7 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 		case s.rch <- data:
 			b.timer.Stop()
 			t := time.Now()
-			s.last.Store(t.UnixNano())
+			s.last.Store(int64(t.Sub(slowBase)))
 			b.waited += t.Sub(now)
 			b.taken += len(data)
 			return nil
@@ -818,12 +826,13 @@ func (s *streamConn) setSlow(slow bool) {
 	s.slow = slow
 	var victim *streamConn
 	if slow {
+		s.slowSince = time.Since(slowBase)
 		slowList = append(slowList, s)
 		if len(slowList) > int(maxSlow.Load()) {
 			// A stream that has been waiting for the server, not for its
 			// reader, for a whole window has nothing buffered: it was slow
 			// and is now idle. It is judged again when data arrives.
-			idle := time.Now().UnixNano() - slowWindow.Load()
+			idle := int64(time.Since(slowBase)) - slowWindow.Load()
 			slowList = slices.DeleteFunc(slowList, func(o *streamConn) bool {
 				if o == s || o.blocked.Load() || o.last.Load() > idle {
 					return false
@@ -839,11 +848,21 @@ func (s *streamConn) setSlow(slow bool) {
 				most = max(most, count[o.src])
 			}
 			// Of that source, the oldest whose reader has data waiting
-			// right now; one that has just resumed is still listed until
-			// its window ends, but pins nothing.
-			i := slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most && o.blocked.Load() })
+			// right now and that has been slow for slowHold windows. With
+			// the short window a download in a wifi hiccup is listed for
+			// a moment, and it must not cost the device its paused video
+			// (round 24). When none has been slow that long, the newest:
+			// the one that has just made the list too long.
+			hold := time.Since(slowBase) - time.Duration(slowHold)*time.Duration(slowWindow.Load())
+			i := slices.IndexFunc(slowList, func(o *streamConn) bool {
+				return count[o.src] == most && o.blocked.Load() && o.slowSince <= hold
+			})
 			if i < 0 {
-				i = slices.IndexFunc(slowList, func(o *streamConn) bool { return count[o.src] == most })
+				for j, o := range slowList {
+					if count[o.src] == most {
+						i = j
+					}
+				}
 			}
 			victim = slowList[i]
 			victim.slow, victim.ended = false, true
@@ -919,7 +938,10 @@ type streamConn struct {
 
 	cut  chan struct{} // closed when the stream is ended as a slow reader
 	slow bool          // in slowList; guarded by slowMu
-	src  string        // whose stream this is, for the slow-reader cap
+	// slowSince is when it was listed, as time since slowBase; guarded by
+	// slowMu.
+	slowSince time.Duration
+	src       string // whose stream this is, for the slow-reader cap
 	// For setSlow, about another stream: readLoop is in deliver waiting
 	// for the reader, and when (unix nanoseconds) deliver last ran.
 	blocked atomic.Bool

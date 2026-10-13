@@ -561,7 +561,10 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		c.SetDeadline(dl)
 	}
-	stop := context.AfterFunc(ctx, func() { c.SetDeadline(time.Unix(1, 0)) })
+	// Closed, not given a past deadline: the connection is not used again
+	// after the context ends, and a deadline does not reach a connection
+	// that is being replaced underneath (round 24).
+	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
 	if err := writeMsg(c, query); err != nil {
 		return nil, err
@@ -577,7 +580,7 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 		}
 		if answers(query, q, resp) {
 			if !stop() {
-				return nil, ctx.Err() // deadline was poisoned; don't reuse c
+				return nil, ctx.Err() // c was closed; don't reuse it
 			}
 			c.SetDeadline(time.Time{})
 			return resp, nil

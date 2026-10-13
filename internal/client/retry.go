@@ -38,6 +38,9 @@ type retryConn struct {
 	st     sync.Mutex
 	cur    net.Conn
 	closed bool
+	// The deadlines the caller set last, for the conn that replaces cur.
+	rdl, wdl       time.Time
+	hasRdl, hasWdl bool
 }
 
 func newRetryConn(c net.Conn, redial func() (net.Conn, error)) *retryConn {
@@ -82,6 +85,16 @@ func (r *retryConn) retryLocked(old net.Conn) error {
 		return net.ErrClosed
 	}
 	r.cur = nc
+	// A deadline set before or during the redial reached only the old
+	// conn: a DNS query that timed out meanwhile then waited on the new
+	// one for ever and kept its upstream slot, and 64 of those stopped
+	// DNS for the LAN (round 24).
+	if r.hasRdl {
+		nc.SetReadDeadline(r.rdl)
+	}
+	if r.hasWdl {
+		nc.SetWriteDeadline(r.wdl)
+	}
 	r.st.Unlock()
 	if len(r.sent) > 0 {
 		if _, err := nc.Write(r.sent); err != nil {
@@ -116,7 +129,17 @@ func (r *retryConn) Write(p []byte) (int, error) {
 		}
 		return n, nil
 	}
-	if !onlyTLSHandshake(r.sent) {
+	// Not after a timeout: it is the caller's deadline, and Read does not
+	// retry on one either. And when the failed Write may have delivered p
+	// (WebSocket early data travels in the handshake request), p is held
+	// to the same rule as what was sent before it (round 24).
+	var ne net.Error
+	var ed interface{ MayBeDelivered() bool }
+	harmless := onlyTLSHandshake(r.sent)
+	if harmless && errors.As(err, &ed) && ed.MayBeDelivered() {
+		harmless = onlyTLSHandshake(append(r.sent[:len(r.sent):len(r.sent)], p...))
+	}
+	if !harmless || errors.As(err, &ne) && ne.Timeout() {
 		r.armed.Store(false)
 		r.sent = nil
 		return n, err
@@ -192,11 +215,29 @@ func (r *retryConn) CloseWrite() error {
 	return nil
 }
 
-func (r *retryConn) LocalAddr() net.Addr               { c, _ := r.conn(); return c.LocalAddr() }
-func (r *retryConn) RemoteAddr() net.Addr              { c, _ := r.conn(); return c.RemoteAddr() }
-func (r *retryConn) SetDeadline(t time.Time) error     { c, _ := r.conn(); return c.SetDeadline(t) }
-func (r *retryConn) SetReadDeadline(t time.Time) error { c, _ := r.conn(); return c.SetReadDeadline(t) }
+func (r *retryConn) LocalAddr() net.Addr  { c, _ := r.conn(); return c.LocalAddr() }
+func (r *retryConn) RemoteAddr() net.Addr { c, _ := r.conn(); return c.RemoteAddr() }
+
+func (r *retryConn) SetDeadline(t time.Time) error {
+	r.st.Lock()
+	r.rdl, r.wdl, r.hasRdl, r.hasWdl = t, t, true, true
+	c := r.cur
+	r.st.Unlock()
+	return c.SetDeadline(t)
+}
+
+func (r *retryConn) SetReadDeadline(t time.Time) error {
+	r.st.Lock()
+	r.rdl, r.hasRdl = t, true
+	c := r.cur
+	r.st.Unlock()
+	return c.SetReadDeadline(t)
+}
+
 func (r *retryConn) SetWriteDeadline(t time.Time) error {
-	c, _ := r.conn()
+	r.st.Lock()
+	r.wdl, r.hasWdl = t, true
+	c := r.cur
+	r.st.Unlock()
 	return c.SetWriteDeadline(t)
 }

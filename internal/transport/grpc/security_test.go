@@ -267,7 +267,54 @@ func floodServer(t *testing.T) (dial func(src ...string) net.Conn) {
 
 func slowLimits(t *testing.T, window time.Duration, max int32) {
 	oldW, oldM := slowWindow.Swap(int64(window)), maxSlow.Swap(max)
-	t.Cleanup(func() { slowWindow.Store(oldW); maxSlow.Store(oldM) })
+	// No hold: the tests of the cap want the oldest slow stream ended at
+	// once. TestSlowHold sets it.
+	slowMu.Lock()
+	oldH := slowHold
+	slowHold = 0
+	slowMu.Unlock()
+	t.Cleanup(func() {
+		slowWindow.Store(oldW)
+		maxSlow.Store(oldM)
+		slowMu.Lock()
+		slowHold = oldH
+		slowMu.Unlock()
+	})
+}
+
+// Round 24: with a window of 250 ms a download in a wifi hiccup is listed
+// as slow for a moment. The stream ended for a list that is too long was
+// the device's oldest slow one, its paused video for example. Only a
+// stream slow for slowHold windows is ended that way; before that, the
+// newest goes.
+func TestSlowHold(t *testing.T) {
+	slowLimits(t, 100*time.Millisecond, 2)
+	slowMu.Lock()
+	slowHold = 50 // 5 s: nothing qualifies during the test
+	slowMu.Unlock()
+	dial := floodServer(t)
+	var conns []net.Conn
+	for range 3 {
+		conns = append(conns, dial()) // read one byte, then nothing
+		time.Sleep(150 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if n := slowCount(); n != 2 {
+		t.Fatalf("%d streams counted as slow, want 2", n)
+	}
+	buf := make([]byte, 16<<10)
+	for i, c := range conns {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		var err error
+		for range 8 {
+			if _, err = c.Read(buf); err != nil {
+				break
+			}
+		}
+		if newest := i == len(conns)-1; newest != errors.Is(err, errStalled) {
+			t.Fatalf("stream %d ended with %v; want only the newest ended", i, err)
+		}
+	}
 }
 
 func slowCount() int {

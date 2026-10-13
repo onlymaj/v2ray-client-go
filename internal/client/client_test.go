@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -463,5 +464,88 @@ func TestRetryConnKeepsOnlyWhatItCouldReplay(t *testing.T) {
 	}
 	if r.armed.Load() || r.sent != nil {
 		t.Fatal("still armed past retryLimit")
+	}
+}
+
+// failFirst fails its first Write with err and records deadlines.
+type failFirst struct {
+	net.Conn
+	err error
+}
+
+func (c *failFirst) Write([]byte) (int, error)        { return 0, c.err }
+func (c *failFirst) Close() error                     { return nil }
+func (c *failFirst) SetDeadline(time.Time) error      { return nil }
+func (c *failFirst) SetReadDeadline(time.Time) error  { return nil }
+func (c *failFirst) SetWriteDeadline(time.Time) error { return nil }
+
+// Round 24: a deadline set while the first Write was redialing reached
+// only the old conn. A DNS query whose timeout passed during the redial
+// then read from the new conn for ever and kept its upstream slot; 64 of
+// those stopped DNS for the whole LAN.
+func TestRetryConnCarriesDeadlinesToTheNewConn(t *testing.T) {
+	a, b := net.Pipe() // b never answers
+	defer b.Close()
+	go io.Copy(io.Discard, b)
+	redialing := make(chan struct{})
+	r := newRetryConn(&failFirst{err: syscall.ECONNRESET}, func() (net.Conn, error) {
+		close(redialing)
+		time.Sleep(200 * time.Millisecond)
+		return a, nil
+	})
+	go func() {
+		<-redialing
+		r.SetDeadline(time.Now().Add(100 * time.Millisecond)) // expires during the redial
+	}()
+	if _, err := r.Write(clientHello); err == nil {
+		// The write may succeed or time out; the read must not hang.
+	}
+	done := make(chan error, 1)
+	go func() { _, err := r.Read(make([]byte, 1)); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Read returned data from a server that sent none")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Read on the new conn ignores the deadline set during the redial")
+	}
+}
+
+type deliveredErr struct{ error }
+
+func (deliveredErr) MayBeDelivered() bool { return true }
+
+// Round 24: a first Write that failed was replayed on a new conn whatever
+// it held. With WebSocket early data the Write is the handshake request
+// and carries the data: the server may have passed a POST on before the
+// failure, and it ran twice. A timeout is the caller's deadline and is not
+// retried either.
+func TestRetryFirstWriteFailurePolicy(t *testing.T) {
+	post := []byte("POST /transfer HTTP/1.1\r\n\r\n")
+	timeout := &net.OpError{Op: "write", Err: os.ErrDeadlineExceeded}
+	for _, tc := range []struct {
+		name   string
+		err    error
+		p      []byte
+		replay bool
+	}{
+		{"dead conn, plaintext", syscall.ECONNRESET, post, true},
+		{"maybe delivered, plaintext", deliveredErr{syscall.ECONNRESET}, post, false},
+		{"maybe delivered, client hello", deliveredErr{syscall.ECONNRESET}, clientHello, true},
+		{"timeout", timeout, clientHello, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fresh := &scriptConn{}
+			dials := 0
+			rc := newRetryConn(&failFirst{err: tc.err}, func() (net.Conn, error) { dials++; return fresh, nil })
+			_, err := rc.Write(tc.p)
+			if replayed := dials == 1 && err == nil && string(fresh.wrote) == string(tc.p); replayed != tc.replay {
+				t.Fatalf("dials=%d err=%v wrote %d bytes; want replay %v", dials, err, len(fresh.wrote), tc.replay)
+			}
+			if !tc.replay && dials != 0 {
+				t.Fatalf("redialed %d times", dials)
+			}
+		})
 	}
 }
