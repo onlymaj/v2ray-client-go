@@ -16,6 +16,8 @@ const (
 	// over TCP and can be 64 KB; a LAN device asking for 1024 such names
 	// would otherwise pin 64 MB.
 	maxCachedResp = 4096
+	// maxCachedRRs is the most records a kept response may have.
+	maxCachedRRs = 64
 )
 
 type cacheKey struct {
@@ -101,7 +103,9 @@ func (c *cache) put(q question, route string, resp []byte) {
 		return
 	}
 	rrs, err := parseRecords(resp, h, rq.End)
-	if err != nil {
+	// An answer made of the smallest records cost twice its size again in
+	// TTL offsets, 8 MiB for a full cache (round 21).
+	if err != nil || len(rrs) > maxCachedRRs {
 		return
 	}
 	var offs []int

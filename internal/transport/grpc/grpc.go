@@ -97,12 +97,14 @@ type Client struct {
 	ua        string
 	t         *http2.Transport
 
-	mu      sync.Mutex
-	cc      *http2.ClientConn
-	raw     net.Conn // underlying conn of cc, for addresses
-	closed  bool
-	streams int         // tunnels open on cc
-	idle    *time.Timer // closes cc; running while streams is 0
+	mu sync.Mutex
+	cc *http2.ClientConn
+	// draining counts replaced connections that still have tunnels.
+	draining int
+	raw      net.Conn // underlying conn of cc, for addresses
+	closed   bool
+	streams  int         // tunnels open on cc
+	idle     *time.Timer // closes cc; running while streams is 0
 }
 
 var _ StreamDialer = (*Client)(nil)
@@ -347,8 +349,26 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 	// claims a slot that the next RoundTrip uses.
 	if c.cc == nil || !c.cc.ReserveNewRequest() {
 		if old := c.cc; old != nil {
+			// A server that allows one stream per connection (or sends a
+			// GOAWAY per stream) would otherwise get a TLS and HTTP/2
+			// connection for every tunnel (round 21).
+			if c.streams > 0 && c.draining >= maxDraining {
+				return nil, errors.New("grpc: the server allows too few streams per connection")
+			}
 			// Let its remaining streams finish, then close it.
-			go old.Shutdown(context.Background())
+			if c.streams > 0 {
+				c.draining++
+			}
+			counted := c.streams > 0
+			go func() {
+				old.Shutdown(context.Background())
+				if counted {
+					c.mu.Lock()
+					c.draining--
+					c.mu.Unlock()
+				}
+			}()
+			idleDrop(c, old)
 			c.cc, c.raw = nil, nil
 		}
 		c.streams = 0
@@ -370,6 +390,7 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 	if c.idle != nil {
 		c.idle.Stop()
 		c.idle = nil
+		idleDrop(c, c.cc)
 	}
 	cc := c.cc
 	s, err := c.open(cc, c.raw, transport.Source(ctx), func() { c.streamDone(cc) })
@@ -402,14 +423,74 @@ func (c *Client) streamDoneLocked(cc *http2.ClientConn) {
 	if c.cc != cc || c.streams > 0 || c.idle != nil {
 		return
 	}
-	c.idle = time.AfterFunc(time.Duration(idleTimeout.Load()), func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if c.cc == cc && c.streams == 0 {
-			cc.Close()
-			c.cc, c.raw, c.idle = nil, nil, nil
+	c.idle = time.AfterFunc(time.Duration(idleTimeout.Load()), func() { c.closeIdle(cc) })
+	for _, old := range idleAdd(c, cc) {
+		go old.c.closeIdle(old.cc) // not here: c.mu is held
+	}
+}
+
+// closeIdle closes cc if it is still the client's connection and has no
+// tunnel.
+func (c *Client) closeIdle(cc *http2.ClientConn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cc == cc && c.streams == 0 {
+		if c.idle != nil {
+			c.idle.Stop()
 		}
-	})
+		idleDrop(c, cc)
+		cc.Close()
+		c.cc, c.raw, c.idle = nil, nil, nil
+	}
+}
+
+// maxDraining is how many replaced connections of one client may still
+// have tunnels. With the usual 100 streams per connection that is far more
+// tunnels than the inbound side accepts.
+const maxDraining = 7
+
+// maxIdleConns bounds the connections without a tunnel over all clients.
+// One lingers for idleTimeout after every health probe, and a subscription
+// of 1000 gRPC servers probed in turn had hundreds open at once, 64 MiB
+// and more with no traffic at all (round 21). A variable for tests.
+var maxIdleConns = 8
+
+type idleConn struct {
+	c  *Client
+	cc *http2.ClientConn
+}
+
+// idleSet lists the connections without a tunnel, oldest first. Its lock
+// is taken with a Client's mu held, never the other way round.
+var idleSet struct {
+	sync.Mutex
+	list []idleConn
+}
+
+// idleAdd records cc as idle and returns the oldest ones beyond
+// maxIdleConns; the caller closes them.
+func idleAdd(c *Client, cc *http2.ClientConn) []idleConn {
+	idleSet.Lock()
+	defer idleSet.Unlock()
+	idleSet.list = append(idleSet.list, idleConn{c, cc})
+	n := len(idleSet.list) - maxIdleConns
+	if n <= 0 {
+		return nil
+	}
+	old := slices.Clone(idleSet.list[:n])
+	idleSet.list = append(idleSet.list[:0], idleSet.list[n:]...)
+	return old
+}
+
+func idleDrop(c *Client, cc *http2.ClientConn) {
+	idleSet.Lock()
+	defer idleSet.Unlock()
+	for i, e := range idleSet.list {
+		if e.c == c && e.cc == cc {
+			idleSet.list = append(idleSet.list[:i], idleSet.list[i+1:]...)
+			return
+		}
+	}
 }
 
 // Close closes the shared HTTP/2 connection (aborting its streams) so a
@@ -427,6 +508,7 @@ func (c *Client) Close() error {
 	if c.cc == nil {
 		return nil
 	}
+	idleDrop(c, c.cc)
 	err := c.cc.Close()
 	c.cc, c.raw = nil, nil
 	return err

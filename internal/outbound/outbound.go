@@ -73,10 +73,16 @@ func Lookup(protocol string) (Factory, error) {
 const LANBuf = 256 << 10
 
 // LANBuffers sets the buffers of an accepted connection.
-func LANBuffers(c net.Conn) {
-	if t, ok := c.(*net.TCPConn); ok {
-		t.SetReadBuffer(LANBuf)
-		t.SetWriteBuffer(LANBuf)
+func LANBuffers(c net.Conn) { SetBuffers(c, LANBuf) }
+
+// SetBuffers sets both socket buffers of c to n bytes.
+func SetBuffers(c net.Conn, n int) {
+	if t, ok := c.(interface {
+		SetReadBuffer(int) error
+		SetWriteBuffer(int) error
+	}); ok {
+		t.SetReadBuffer(n)
+		t.SetWriteBuffer(n)
 	}
 }
 

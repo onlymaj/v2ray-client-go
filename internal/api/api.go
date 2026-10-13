@@ -302,7 +302,13 @@ func (s *server) update(fn func(*config.Config) error) error {
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	// No HTML escaping: the reply is application/json with nosniff and the
+	// UI puts text in text nodes. Escaped, "<" and "&" are six bytes each,
+	// and a subscription made of them had a client list four times the
+	// size of the config (round 21).
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.Encode(v)
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
@@ -313,6 +319,10 @@ func writeError(w http.ResponseWriter, err error) {
 	var he *httpError
 	if errors.As(err, &he) {
 		writeErr(w, he.code, he.msg)
+		return
+	}
+	if errors.Is(err, config.ErrTooLarge) {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeErr(w, http.StatusInternalServerError, err.Error())

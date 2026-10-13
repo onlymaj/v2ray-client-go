@@ -269,6 +269,7 @@ func (v *vision) read(p []byte) (int, error) {
 			return 0, v.rerr
 		}
 		if v.s.readerDirect {
+			v.rbuf = nil // not used again; pending is empty here
 			return v.r.Read(p)
 		}
 		n, err := v.r.Read(v.rbuf)

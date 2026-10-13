@@ -15,6 +15,11 @@ import (
 // import can't exhaust the router's memory.
 const MaxClients = 1000
 
+// MaxMemberships bounds the members of all groups together. Each costs
+// about 150 bytes across the config and the dispatcher: 200 groups of 1000
+// members were 36 MiB (round 21).
+const MaxMemberships = 4000
+
 // Validate checks references between clients, groups and rules, and that
 // the rules compile. Protocol-specific fields are checked when the client's
 // dialer is built.
@@ -27,6 +32,13 @@ func (c *Config) Validate() error {
 	}
 	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(strings.ReplaceAll(h, ":", "")) {
 		return errors.New("routeros certSha256 must be 64 hex characters")
+	}
+	members := 0
+	for _, g := range c.Groups {
+		members += len(g.Members)
+	}
+	if members > MaxMemberships {
+		return fmt.Errorf("too many group members in total (%d, limit %d)", members, MaxMemberships)
 	}
 	clients := map[string]bool{}
 	for _, cl := range c.Clients {

@@ -19,8 +19,21 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// MaxWarm bounds the warm conns of all pools together. Each pool is small,
+// but there is one per client: a group that spreads connections over many
+// clients kept two warm conns on every one of them, 2000 conns and 64 MiB
+// at the client limit (round 21).
+const MaxWarm = 32
+
+var maxWarm atomic.Int32 // MaxWarm; tests lower it
+
+func init() { maxWarm.Store(MaxWarm) }
+
+var warm atomic.Int32 // idle conns in all pools
 
 const (
 	DefaultMax  = 2
@@ -62,6 +75,7 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 	now := p.now()
 	busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
 	p.lastGet = now
+	before := len(p.idle)
 	for len(p.idle) > 0 && c == nil {
 		e := p.idle[len(p.idle)-1] // newest
 		p.idle = p.idle[:len(p.idle)-1]
@@ -71,6 +85,7 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 			e.c.Close()
 		}
 	}
+	warm.Add(int32(len(p.idle) - before))
 	if busy && !p.closed && !p.filling && len(p.idle) < p.max {
 		p.filling = true
 		go p.fill()
@@ -87,6 +102,12 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 // dial fails.
 func (p *Pool) fill() {
 	for {
+		if warm.Load() >= maxWarm.Load() {
+			p.mu.Lock()
+			p.filling = false
+			p.mu.Unlock()
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
 		c, err := p.dial(ctx)
 		cancel()
@@ -101,6 +122,7 @@ func (p *Pool) fill() {
 		}
 		now := p.now()
 		p.idle = append(p.idle, entry{c, now})
+		warm.Add(1)
 		if p.timer == nil {
 			p.timer = time.AfterFunc(p.ttl, p.sweep)
 		}
@@ -123,6 +145,7 @@ func (p *Pool) sweep() {
 		return
 	}
 	now := p.now()
+	defer func(before int) { warm.Add(int32(len(p.idle) - before)) }(len(p.idle))
 	n := 0
 	for _, e := range p.idle {
 		if now.Sub(e.at) >= p.ttl {
@@ -156,5 +179,6 @@ func (p *Pool) Close() {
 	for _, e := range p.idle {
 		e.c.Close()
 	}
+	warm.Add(int32(-len(p.idle)))
 	p.idle = nil
 }

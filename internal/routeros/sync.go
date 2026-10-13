@@ -356,7 +356,11 @@ func (s *Syncer) resolveAll(ctx context.Context, hosts []string, cache map[strin
 		// A host name from a subscription can resolve to thousands of
 		// addresses; each would become a firewall entry on the router.
 		slices.SortFunc(ips, netip.Addr.Compare) // which ones are kept must not vary
-		cache[h] = ips[:min(len(ips), maxAddrsPerHost)]
+		// A copy, and of the name too: the slice kept the resolver's whole
+		// answer (4000 addresses fit in one, 96 KiB per name, 96 MiB for a
+		// subscription of 1000 such names) and the key the text it was cut
+		// from (round 21).
+		cache[strings.Clone(h)] = slices.Clone(ips[:min(len(ips), maxAddrsPerHost)])
 	}
 	for h := range cache {
 		if !seen[h] {

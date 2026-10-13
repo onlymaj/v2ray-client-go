@@ -159,3 +159,40 @@ func TestDialErrorStopsFill(t *testing.T) {
 		t.Fatal("pool filled despite errors")
 	}
 }
+
+// Round 21: each pool was bounded but there is one per client, so a group
+// spread over many clients kept two warm conns on every one of them. All
+// pools together now hold MaxWarm at most.
+func TestWarmConnsAreBoundedOverAllPools(t *testing.T) {
+	const limit = 3
+	maxWarm.Store(limit)
+	defer maxWarm.Store(MaxWarm)
+	if n := warm.Load(); n != 0 {
+		t.Fatalf("%d warm conns before the test", n)
+	}
+	ctx := context.Background()
+	var pools []*Pool
+	for range 5 {
+		p, _, clk := newTest()
+		pools = append(pools, p)
+		p.Get(ctx)
+		clk.add(time.Second)
+		p.Get(ctx) // busy: would refill to 2
+	}
+	time.Sleep(200 * time.Millisecond)
+	total := 0
+	for _, p := range pools {
+		total += p.Len()
+	}
+	// A fill that was past the check when the limit was reached may add
+	// one more.
+	if total < limit || total > limit+len(pools) || int(warm.Load()) != total {
+		t.Fatalf("%d warm conns in the pools, counter %d, limit %d", total, warm.Load(), limit)
+	}
+	for _, p := range pools {
+		p.Close()
+	}
+	if n := warm.Load(); n != 0 {
+		t.Fatalf("counter is %d after closing every pool", n)
+	}
+}

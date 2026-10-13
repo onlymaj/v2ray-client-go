@@ -239,12 +239,17 @@ func (c *clientConn) Write(p []byte) (int, error) {
 	if c.wclosed {
 		return 0, net.ErrClosed
 	}
-	if c.enc == nil { // zero: raw body
-		if c.header == nil {
-			return c.Conn.Write(p)
-		}
-		c.wbuf = append(append(c.wbuf[:0], c.header...), p...)
-		if _, err := c.Conn.Write(c.wbuf); err != nil {
+	if c.enc == nil && c.header == nil { // zero: raw body
+		return c.Conn.Write(p)
+	}
+	// The buffer is borrowed for this call: kept in the conn it stayed at
+	// 21 KiB after one large write, for the life of every connection
+	// (round 21).
+	bp := wbufPool.Get().(*[]byte)
+	defer func() { wbufPool.Put(bp) }()
+	if c.enc == nil {
+		*bp = append(append((*bp)[:0], c.header...), p...)
+		if _, err := c.Conn.Write(*bp); err != nil {
 			return 0, err
 		}
 		c.header = nil
@@ -254,10 +259,11 @@ func (c *clientConn) Write(p []byte) (int, error) {
 	for len(p) > 0 {
 		chunk := p[:min(len(p), c.enc.maxPayload())]
 		// Batch a few chunks per syscall.
-		c.wbuf = append(c.wbuf[:0], c.header...)
-		for len(chunk) > 0 && len(c.wbuf) < 4*bufSize {
+		w := append((*bp)[:0], c.header...)
+		for len(chunk) > 0 && len(w) < 4*bufSize {
 			var err error
-			if c.wbuf, err = c.enc.seal(c.wbuf, chunk); err != nil {
+			if w, err = c.enc.seal(w, chunk); err != nil {
+				*bp = w
 				c.Conn.Close()
 				return n, err
 			}
@@ -265,12 +271,29 @@ func (c *clientConn) Write(p []byte) (int, error) {
 			n += len(chunk)
 			chunk = p[:min(len(p), c.enc.maxPayload())]
 		}
-		if _, err := c.Conn.Write(c.wbuf); err != nil {
+		*bp = w
+		if _, err := c.Conn.Write(w); err != nil {
 			return n, err
 		}
 		c.header = nil
 	}
 	return n, nil
+}
+
+// wbufPool and rbufPool hold the write and chunk buffers between uses.
+var (
+	wbufPool = sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }}
+	rbufPool = sync.Pool{New: func() any { b := make([]byte, 0, 2048); return &b }}
+)
+
+// releaseRbuf gives the chunk buffer back once nothing of it is left to
+// deliver, so that a connection waiting for data holds none.
+func (c *clientConn) releaseRbuf() {
+	if c.rbuf != nil {
+		b := c.rbuf[:0]
+		rbufPool.Put(&b)
+		c.rbuf = nil
+	}
 }
 
 // flushHeaderLocked sends the request header alone (wmu held).
@@ -319,6 +342,7 @@ func (c *clientConn) Read(p []byte) (int, error) {
 		n := copy(p, c.leftover)
 		if c.leftover = c.leftover[n:]; len(c.leftover) == 0 {
 			c.leftover = nil // don't pin an oversized chunk while idle
+			c.releaseRbuf()
 		}
 		return n, nil
 	}
@@ -347,12 +371,16 @@ func (c *clientConn) Read(p []byte) (int, error) {
 		return c.br.Read(p)
 	}
 	for {
+		if c.rbuf == nil {
+			c.rbuf = *rbufPool.Get().(*[]byte)
+		}
 		pt, err := c.dec.open(c.br, c.rbuf)
 		if err != nil {
 			if err == errNonceExhausted {
 				c.Conn.Close()
 			}
 			c.rerr = err
+			c.releaseRbuf()
 			return 0, err
 		}
 		// Keep a grown buffer only up to the usual chunk size, so a server
@@ -364,7 +392,10 @@ func (c *clientConn) Read(p []byte) (int, error) {
 			continue
 		}
 		n := copy(p, pt)
-		c.leftover = pt[n:]
+		if c.leftover = pt[n:]; len(c.leftover) == 0 {
+			c.leftover = nil
+			c.releaseRbuf()
+		}
 		return n, nil
 	}
 }

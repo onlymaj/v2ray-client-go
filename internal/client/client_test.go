@@ -433,3 +433,35 @@ func TestRetryConnCloseDuringStuckWrite(t *testing.T) {
 		t.Fatal("Write not ended by Close")
 	}
 }
+
+// Round 21: an armed retryConn kept up to 16 KiB of what the client wrote
+// until the first byte came back, although only a TLS handshake is ever
+// replayed. A device with connections to hosts that never answer held that
+// on each of them.
+func TestRetryConnKeepsOnlyWhatItCouldReplay(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	go io.Copy(io.Discard, b)
+	r := newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	if _, err := r.Write([]byte("GET / HTTP/1.1\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if r.armed.Load() || r.sent != nil {
+		t.Fatalf("armed %v with %d bytes kept after a write that is not a TLS handshake", r.armed.Load(), len(r.sent))
+	}
+	r = newRetryConn(a, func() (net.Conn, error) { return nil, net.ErrClosed })
+	hello := append([]byte{0x16, 0x03, 0x01, 0x00, 0x04}, 1, 2, 3, 4)
+	if _, err := r.Write(hello); err != nil {
+		t.Fatal(err)
+	}
+	if !r.armed.Load() || len(r.sent) != len(hello) {
+		t.Fatalf("a TLS handshake record is not kept for replay (armed %v, %d bytes)", r.armed.Load(), len(r.sent))
+	}
+	if _, err := r.Write(make([]byte, retryLimit)); err != nil {
+		t.Fatal(err)
+	}
+	if r.armed.Load() || r.sent != nil {
+		t.Fatal("still armed past retryLimit")
+	}
+}

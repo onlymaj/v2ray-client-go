@@ -370,6 +370,17 @@ func TestClientAgainstFakeServer(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal("server:", err)
 			}
+			// Round 21: the write buffer (21 KiB after one large write)
+			// and the chunk buffer stayed with the connection for its
+			// whole life. Nothing is in flight now, so it holds neither.
+			cc := c.(*clientConn)
+			cc.wmu.Lock()
+			cc.rmu.Lock()
+			if cc.rbuf != nil || cc.leftover != nil || cap(cc.wbuf) > 2048 {
+				t.Errorf("idle conn holds rbuf %d, leftover %d, wbuf %d bytes", cap(cc.rbuf), cap(cc.leftover), cap(cc.wbuf))
+			}
+			cc.rmu.Unlock()
+			cc.wmu.Unlock()
 		})
 	}
 }

@@ -819,3 +819,127 @@ func TestTunnelRequestDoesNotAskForGzip(t *testing.T) {
 		t.Fatal("no request")
 	}
 }
+
+// h2Echo serves gRPC-looking tunnels that echo, with the given stream
+// limit, and counts the connections it accepted.
+func h2Echo(t *testing.T, maxStreams uint32) (addr string, conns *atomic.Int32) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	conns = new(atomic.Int32)
+	h2 := &http2.Server{MaxConcurrentStreams: maxStreams}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns.Add(1)
+			go h2.ServeConn(c, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/grpc")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				buf := make([]byte, 4096)
+				for {
+					n, err := r.Body.Read(buf)
+					if n > 0 {
+						w.Write(buf[:n])
+						w.(http.Flusher).Flush()
+					}
+					if err != nil {
+						return
+					}
+				}
+			})})
+		}
+	}()
+	return ln.Addr().String(), conns
+}
+
+// Round 21: a connection lingers for idleTimeout after its last tunnel,
+// and that includes the one tunnel of a health probe. Nothing bounded how
+// many did at once: a subscription of 1000 gRPC servers probed in turn had
+// hundreds of TLS and HTTP/2 connections open with no traffic.
+func TestIdleConnsAreBoundedOverAllClients(t *testing.T) {
+	old := maxIdleConns
+	maxIdleConns = 2
+	defer func() { maxIdleConns = old }()
+	addr, _ := h2Echo(t, 100)
+	const clients = 6
+	var cls []*Client
+	for i := range clients {
+		l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+		cl := l.(*Client)
+		defer cl.Close()
+		cls = append(cls, cl)
+		c, err := cl.DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+			return net.Dial("tcp", addr)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 { // with and without a byte sent
+			if _, err := c.Write([]byte("x")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c.Close() // a probe: one tunnel, then none
+	}
+	open := func() (n int) {
+		for _, cl := range cls {
+			cl.mu.Lock()
+			if cl.cc != nil {
+				n++
+			}
+			cl.mu.Unlock()
+		}
+		return n
+	}
+	for i := 0; open() > maxIdleConns && i < 300; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	idleSet.Lock()
+	listed := len(idleSet.list)
+	idleSet.Unlock()
+	if n := open(); n != maxIdleConns || listed != maxIdleConns {
+		t.Fatalf("%d of %d clients still hold a connection, %d listed as idle; want %d", n, clients, listed, maxIdleConns)
+	}
+}
+
+// Round 21: a server that allows one stream per connection got a TLS and
+// HTTP/2 connection for every tunnel, without limit.
+func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
+	addr, conns := h2Echo(t, 1)
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	var open []net.Conn
+	defer func() {
+		for _, c := range open {
+			c.Close()
+		}
+	}()
+	var lastErr error
+	for i := 0; i < maxDraining+4; i++ {
+		c, err := cl.DialStream(context.Background(), dial)
+		if err != nil {
+			lastErr = err
+			break
+		}
+		open = append(open, c)
+		// A round trip, so the server's stream limit has arrived.
+		c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if lastErr == nil || len(open) != maxDraining+1 || int(conns.Load()) != maxDraining+1 {
+		t.Fatalf("%d tunnels on %d connections, err %v; want %d and a refusal", len(open), conns.Load(), lastErr, maxDraining+1)
+	}
+}

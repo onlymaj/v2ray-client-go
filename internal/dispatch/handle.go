@@ -52,6 +52,10 @@ const (
 	sniffMax = 4 << 10 // a Chrome ClientHello with ML-KEM is ~2 KB
 )
 
+// peekPool holds the buffers of the sniff: a quarter of a copy buffer,
+// held for up to the sniff timeout by a connection that sends nothing.
+var peekPool = sync.Pool{New: func() any { b := make([]byte, sniffMax); return &b }}
+
 var bufPool = sync.Pool{New: func() any { b := make([]byte, bufSize); return &b }}
 
 // Handle serves one inbound TCP connection to dst and closes it. If
@@ -69,10 +73,10 @@ func (d *Dispatcher) Handle(conn net.Conn, src netip.AddrPort, dst outbound.Addr
 	domain := dst.Domain
 	var head []byte
 	if sniffable && domain == "" {
-		bp := bufPool.Get().(*[]byte)
+		bp := peekPool.Get().(*[]byte)
 		var err error
-		head, domain, err = peek(conn, (*bp)[:sniffMax])
-		bufPool.Put(bp)
+		head, domain, err = peek(conn, *bp)
+		peekPool.Put(bp)
 		if err != nil {
 			return
 		}

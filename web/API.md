@@ -64,7 +64,7 @@ The mock accepts the password `admin`.
 }
 ```
 
-A share link is at most 16 KiB; a longer line of an import or a subscription is reported as an error for that line. `name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (2 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
+A share link is at most 16 KiB; a longer line of an import or a subscription is reported as an error for that line. `name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (2 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice. All groups together may have 4000 members. The whole configuration is limited to 1 MiB as written to `config.json`; a change that would exceed it gets 400. Replies are not HTML-escaped (`<`, `>` and `&` appear as they are).
 
 | Method | Path | Body | Response |
 |---|---|---|---|

@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 const (
@@ -195,6 +196,23 @@ func TestOversizedLinkCostsLittle(t *testing.T) {
 		}
 		if d := after.TotalAlloc - before.TotalAlloc; d > 6<<20 {
 			t.Errorf("%s: %d MiB allocated for a %d MiB body", name, d>>20, len(body)>>20)
+		}
+	}
+}
+
+// Round 21: a client's fields were cut from the text it was parsed from,
+// so every client added by a refresh kept the whole body alive, 2 MiB each
+// time. They are cut from a copy of their own line.
+func TestParsedClientDoesNotPinTheBody(t *testing.T) {
+	body := strings.Repeat("# padding\n", 1000) + "vless://b831381d-6324-4d53-ad4f-8cda48b30811@pinned.example:443?security=tls#x\n"
+	r := ParseBulk(body)
+	if len(r.Clients) != 1 {
+		t.Fatalf("%+v", r)
+	}
+	lo := uintptr(unsafe.Pointer(unsafe.StringData(body)))
+	for _, f := range []string{r.Clients[0].Address, r.Clients[0].ID, r.Clients[0].Name} {
+		if p := uintptr(unsafe.Pointer(unsafe.StringData(f))); f != "" && p >= lo && p < lo+uintptr(len(body)) {
+			t.Fatalf("field %q points into the body", f)
 		}
 	}
 }

@@ -859,3 +859,16 @@ func TestFetchRefusesSelfAndGateway(t *testing.T) {
 		t.Fatalf("err %v, %d requests reached the server", err, hits.Load())
 	}
 }
+
+// Round 21: replies were HTML-escaped, six bytes for every "<", ">" and
+// "&": a subscription made of them had a client list four times the size
+// of the config, and the whole reply is in memory before it is sent.
+func TestRepliesAreNotHTMLEscaped(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	e.expect("POST", "/api/import", map[string]string{"text": link(t, "a<b>&c", "h.example", 443, u1)}, 200, nil)
+	_, body := e.do("GET", "/api/clients", nil)
+	if !strings.Contains(string(body), "a<b>&c") || strings.Contains(string(body), `\u003c`) {
+		t.Fatalf("client list: %.300s", body)
+	}
+}

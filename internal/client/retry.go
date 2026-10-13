@@ -10,7 +10,7 @@ import (
 
 // retryLimit bounds the data kept for replay; past it the conn is
 // considered in use and no longer retried.
-const retryLimit = 16 << 10
+const retryLimit = 4 << 10
 
 // retryConn wraps a proxied conn that runs on a reused pooled transport
 // conn. Until the first byte is read back it records what was written; if
@@ -107,8 +107,12 @@ func (r *retryConn) Write(p []byte) (int, error) {
 		if len(r.sent)+len(p) > retryLimit {
 			r.armed.Store(false)
 			r.sent = nil
-		} else {
-			r.sent = append(r.sent, p...)
+		} else if r.sent = append(r.sent, p...); len(r.sent) >= 2 && (r.sent[0] != 0x16 || r.sent[1] != 0x03) {
+			// Not a TLS handshake: it would never be replayed, so there
+			// is nothing to keep it for. Kept, a device with connections
+			// to hosts that never answer held 16 KiB on each (round 21).
+			r.armed.Store(false)
+			r.sent = nil
 		}
 		return n, nil
 	}

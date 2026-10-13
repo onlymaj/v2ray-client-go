@@ -688,3 +688,81 @@ func TestExchangeRefusesOversizeAnswer(t *testing.T) {
 		t.Fatalf("20 KiB answer: %v", err)
 	}
 }
+
+// Round 21: a response made of the smallest records was kept with an
+// 8-byte offset for each, twice its size again: 8 MiB for a full cache.
+func TestResponseWithManyRecordsNotCached(t *testing.T) {
+	c := newCache(8)
+	q := buildQuery(1, "many.example", typeA, 0)
+	_, qq, _ := parseQuestion(q)
+	ttls := make([]uint32, maxCachedRRs) // plus the OPT record; 16 bytes each, under maxCachedResp
+	for i := range ttls {
+		ttls[i] = 300
+	}
+	if resp := buildAResponse(q, ttls...); len(resp) > maxCachedResp {
+		t.Fatalf("test response is %d bytes", len(resp))
+	} else {
+		c.put(qq, "", resp)
+	}
+	if c.len() != 0 {
+		t.Fatalf("response with %d records was cached", len(ttls)+1)
+	}
+	c.put(qq, "", buildAResponse(q, ttls[:maxCachedRRs-1]...))
+	if c.len() != 1 {
+		t.Fatalf("response with %d records not cached", maxCachedRRs)
+	}
+}
+
+// Round 21: the TCP listener's sockets kept the kernel's growing send
+// buffer: a client that pipelined queries and stopped reading had 4 MiB
+// queued on each connection.
+func TestTCPClientSocketBuffersAreBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(Options{Upstream: "192.0.2.1:53", TCPIdleTimeout: 200 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.serveTCP(ctx, spyListener{ln, t})
+	defer ln.Close()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	c.Read(make([]byte, 1)) // the server closes or the deadline passes
+	if n := sndbuf.Load(); n <= 0 || n > 2*tcpBuf {
+		t.Fatalf("SO_SNDBUF of the accepted connection is %d, want at most %d", n, 2*tcpBuf)
+	}
+}
+
+var sndbuf atomic.Int64
+
+// spyListener hands out conns that report their send buffer size when
+// they are closed, which is after serveTCP has set it.
+type spyListener struct {
+	net.Listener
+	t *testing.T
+}
+
+type spyConn struct{ *net.TCPConn }
+
+func (l spyListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return spyConn{c.(*net.TCPConn)}, nil
+}
+
+func (c spyConn) Close() error {
+	if rc, err := c.SyscallConn(); err == nil {
+		rc.Control(func(fd uintptr) {
+			n, _ := syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF)
+			sndbuf.Store(int64(n))
+		})
+	}
+	return c.TCPConn.Close()
+}

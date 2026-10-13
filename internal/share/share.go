@@ -518,6 +518,12 @@ func ParseBulk(text string) Result {
 			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: fmt.Sprintf("too many links (max %d)", MaxLinks)})
 			break
 		}
+		// A copy of the line: the client's fields are cut from it, and cut
+		// from text they kept the whole subscription body alive, 2 MiB for
+		// every refresh that brought a new server (round 21).
+		if len(line) <= MaxLinkLen { // a longer one is refused, not kept
+			line = strings.Clone(line)
+		}
 		c, err := Parse(line)
 		switch {
 		case err == nil:

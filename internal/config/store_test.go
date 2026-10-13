@@ -3,9 +3,12 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"github.com/onlymaj/v2ray-client-go/internal/group"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -213,5 +216,38 @@ func TestOpenRemovesLeftoverTempFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(other); err != nil {
 		t.Fatalf("an unrelated file was removed: %v", err)
+	}
+}
+
+// Round 21: nothing bounded the config as a whole. A subscription at its
+// body limit made one of 3 MiB, which cost 10 to 15 MiB on every save, and
+// 200 groups of 1000 members were 36 MiB.
+func TestConfigSizeLimits(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Update(func(c *Config) error {
+		c.Groups[0].Name = strings.Repeat("n", MaxFileSize)
+		return nil
+	})
+	if !errors.Is(err, ErrTooLarge) || len(s.Get().Groups[0].Name) > 100 {
+		t.Fatalf("a config over the size limit: %v", err)
+	}
+	c := Default()
+	for i := range 5 {
+		id := "c" + strconv.Itoa(i)
+		c.Clients = append(c.Clients, Client{ID: id, Name: id, Protocol: "vless", Address: "h.example", Port: 443,
+			UUID: "b831381d-6324-4d53-ad4f-8cda48b30811", Network: "tcp", Enabled: true})
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("test config: %v", err)
+	}
+	for g := 0; g*5 <= MaxMemberships; g++ {
+		c.Groups = append(c.Groups, group.Group{ID: "g" + strconv.Itoa(g), Name: "g", Strategy: group.Failover,
+			Members: []string{"c0", "c1", "c2", "c3", "c4"}})
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "too many group") {
+		t.Fatalf("%d memberships: %v", len(c.Groups)*5, err)
 	}
 }

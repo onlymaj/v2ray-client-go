@@ -25,6 +25,16 @@ type Store struct {
 	notifyMu sync.Mutex // serializes subscriber calls
 }
 
+// MaxFileSize bounds config.json. Every save clones the config through
+// JSON, validates it and encodes it again, and each part that uses it keeps
+// its own structures: a config of 3 MiB cost 10 to 15 MiB on every save and
+// 8 MiB for each list the UI asked for (round 21). 1000 ordinary clients
+// are under half of this.
+const MaxFileSize = 1 << 20
+
+// ErrTooLarge is returned by Update when the config would not fit.
+var ErrTooLarge = errors.New("the configuration is too large")
+
 // tmpPattern names the temporary file of a save.
 const tmpPattern = ".config-*.json"
 
@@ -127,6 +137,9 @@ func (s *Store) write(c *Config) error {
 	data, err := marshal(c, "  ")
 	if err != nil {
 		return err
+	}
+	if len(data) > MaxFileSize {
+		return fmt.Errorf("%w: %d KiB, the limit is %d KiB; remove clients, rules or a subscription", ErrTooLarge, len(data)>>10, MaxFileSize>>10)
 	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

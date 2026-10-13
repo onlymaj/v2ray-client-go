@@ -358,6 +358,11 @@ func TestResolveAllBounds(t *testing.T) {
 	if len(got) != maxAddrsPerHost+1 || len(cache["many.example"]) != maxAddrsPerHost {
 		t.Fatalf("kept %d addresses (%d cached), want %d per host", len(got), len(cache["many.example"]), maxAddrsPerHost)
 	}
+	// Round 21: the cached slice was cut from the resolver's answer and
+	// kept all of it alive: 96 KiB per name for an answer of 4000 addresses.
+	if c := cap(cache["many.example"]); c > maxAddrsPerHost {
+		t.Fatalf("the cache keeps the resolver's array of %d addresses", c)
+	}
 }
 
 // Round 9: with the pass deadline from round 8, names at the end of the

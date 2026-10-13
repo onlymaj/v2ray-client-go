@@ -364,6 +364,10 @@ func (s *Server) serveTCP(ctx context.Context, ln net.Listener) error {
 			c.Close()
 			continue
 		}
+		// Answers are 16 KiB at most. With the kernel's own sizing a
+		// client that pipelined queries and stopped reading had 4 MiB
+		// queued on each of its connections (round 21).
+		outbound.SetBuffers(c, tcpBuf)
 		go func() {
 			defer func() { <-conns; s.tcpConns.release(src) }()
 			s.serveTCPConn(ctx, c)
@@ -664,6 +668,9 @@ func (s *Server) reapIdle(ctx context.Context) {
 // bytes; the rest of a larger one would be held in memory while it waits and
 // then sent upstream through the proxy.
 const maxQuery = 4096
+
+// tcpBuf is the socket buffer size of a client's TCP connection.
+const tcpBuf = 64 << 10
 
 // maxAnswer bounds an upstream answer. readMsg grows with the bytes that
 // arrive, but an upstream behind a hostile server could still send all but
