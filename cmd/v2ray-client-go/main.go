@@ -208,6 +208,10 @@ func run() error {
 		}
 		log.Printf("redirect installed via %s -> :%d", inst.Method, cfg.Settings.Ports.Transparent)
 		defer inst.Remove()
+	} else {
+		// A development switch. Left set on a router, the container looks
+		// healthy and intercepts nothing (round 24).
+		log.Printf("WARNING: NO_REDIRECT=1: the redirect is not installed, so traffic routed to this container is NOT proxied; SOCKS, HTTP and DNS still work")
 	}
 
 	ui, err := api.New(api.Options{

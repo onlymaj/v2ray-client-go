@@ -78,6 +78,9 @@ export function Import() {
               <b className={result.errors.length ? 'text-destructive' : ''}>{result.errors.length}</b> failed.
             </p>
             {result.added.length > 0 && (
+              <p className="m-0 text-muted-foreground">New clients are enabled and join the Default group. Remove them there if they should not carry its traffic.</p>
+            )}
+            {result.added.length > 0 && (
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {result.added.map((c) => (
                   <span key={c.id} className="inline-flex items-center gap-1">

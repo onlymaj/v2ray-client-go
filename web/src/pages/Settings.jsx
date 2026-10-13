@@ -74,7 +74,7 @@ export function Settings() {
           <Field label="Interval (seconds)">
             <Input type="number" min="5" max="3600" required value={s.healthInterval} onInput={(e) => setS({ ...s, healthInterval: e.currentTarget.value })} />
           </Field>
-          <Field label="Kill switch" hint="When the chosen client or group has no healthy member">
+          <Field label="Kill switch" hint="When the chosen group has no healthy member, or the chosen client is disabled. A rule to one enabled client never falls back: its connections fail while it is down.">
             <SimpleSelect value={s.killSwitch} options={[['block', 'Block traffic'], ['direct', 'Send direct']]} onChange={(v) => setS({ ...s, killSwitch: v })} />
           </Field>
           <Field label="DNS upstream" hint="ip:port, queried over TCP through the matched client">

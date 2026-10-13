@@ -89,7 +89,7 @@ The server validates these fields: `name` and `address` must not be empty. `port
 
 - `text` contains one `vless://` or `vmess://` link per line. The server ignores blank lines and lines that start with `#`. If the whole text is base64, the server decodes it first. This is the usual subscription body format.
 - `line` is 1-based. `text` is the offending line, truncated to 256 characters. A link that parses but cannot be used (for example an unknown `fp`, a `uuid` that is not a UUID, or `headerType=http`) is reported the same way; if it was found after parsing, `line` is 0 and `text` is the client's name.
-- Imported clients are `untrusted` and have `allowInsecure` false.
+- Imported clients are `untrusted` and have `allowInsecure` false. They are enabled and added to the group with id `default` (the first-start group, whatever it is called now), if it exists: when the default rule points at that group they can carry traffic at once. The same holds for clients a subscription refresh adds; a server whose link changes between refreshes counts as new and is added again after the admin removed it from the group.
 - `skipped` counts links that are already present (same address, port and uuid).
 
 Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", "note"}`. `lastError` is set only when the last refresh failed and changed nothing. `note` (omitted when empty) belongs to a refresh that was applied: how many links failed to parse and how many clients were kept.
@@ -137,7 +137,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
   "ports": { "transparent": 12345, "socks": 1080, "http": 8118, "dns": 5353, "ui": 8080 },  // 1-65535; socks/http/dns accept 0 = disabled
   "healthUrl": "https://www.gstatic.com/generate_204",
   "healthInterval": 30,          // seconds, 5-3600
-  "killSwitch": "block",         // "block" | "direct" (a group with no working member and an enabled member not checked yet always blocks)
+  "killSwitch": "block",         // "block" | "direct" (a group with no working member and an enabled member not checked yet always blocks; a rule that targets one client does not look at its health: while the client is enabled its connections are dialed and fail, and when it is disabled the kill switch applies at once)
   "dnsUpstream": "1.1.1.1:53",   // ip:port (IPv6 as [addr]:port), queried over TCP through the matched client; not a loopback, unspecified or multicast address
   "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",

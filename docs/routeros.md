@@ -127,6 +127,8 @@ Replace both passwords before you paste this (`another-long-random` also in sect
 - Use `/export hide-sensitive` (the default on recent v7) when you share an export, and keep backup files private.
 - Do not give router accounts the `read` policy unless they need it.
 
+The app's own `config.json` in the mounted data directory is plaintext too. It holds every client's UUID and Reality keys, subscription URLs with their tokens, and the RouterOS REST password if you entered it in the UI. Whoever can read files on the router's storage can read it, so entering the REST password in the UI is no safer than passing it as `ROS_PASS`.
+
 > RouterOS 7.20 and later renamed these properties: envs and mounts use `list=` instead of `name=`, and `/container/add` takes `envlists=` / `mountlists=`. Run `/container/envs/add ?` to see which form your version accepts.
 
 ## 6. Import and start the container
@@ -389,6 +391,8 @@ What should happen to proxied traffic when no proxy works? The app and the route
 
 - `block` (default): the connection is refused, so proxied TCP does not leak. This covers only what the router sends to the container: UDP (section 7) and IPv6 (unless you followed "IPv6 (required)") never reach it.
 - `direct`: the connection goes out directly from the container. This applies only after a health check has found the clients down. While some enabled client of the group has not been checked yet (the first seconds after a start, or after a client is added or enabled) and none is known to work, the connection is refused instead, so a restart does not send traffic out directly while a proxy is fine. A client that was disabled counts as not checked when it is enabled again.
+
+Both modes are about groups. A rule that targets a single client does not look at its health: while the client is enabled, connections are dialed through it and fail when it is down, under either mode. When you disable that client, the kill switch applies at once, so with `direct` that rule's traffic goes out directly.
 
 **On the router** (for when the container itself is down or stopped):
 
