@@ -42,7 +42,8 @@ export function ClientEdit({ id }) {
     setC((x) => ({
       ...x,
       protocol: p,
-      security: p === 'vmess' ? (VMESS_CIPHERS.includes(x.security) ? x.security : 'auto') : 'none',
+      // Coming from VLESS, 'none' is its placeholder, not a choice of the VMess cipher "none".
+      security: p === 'vmess' ? (x.protocol === 'vmess' && VMESS_CIPHERS.includes(x.security) ? x.security : 'auto') : 'none',
       tls: p === 'vmess' && x.tls === 'reality' ? 'tls' : x.tls,
       flow: p === 'vmess' ? '' : x.flow,
     }));

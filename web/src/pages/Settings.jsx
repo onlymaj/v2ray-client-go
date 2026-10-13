@@ -141,7 +141,7 @@ export function Settings() {
             <Input
               className="font-mono text-xs"
               autoComplete="off"
-              pattern="^([0-9a-fA-F]{2}:?){31}[0-9a-fA-F]{2}$"
+              pattern="^\s*([0-9a-fA-F]{2}[: ]?){31}[0-9a-fA-F]{2}\s*$"
               title="SHA-256 fingerprint: 64 hex characters"
               value={s.routeros.certSha256 || ''}
               onInput={(e) => ros('certSha256', e.currentTarget.value)}

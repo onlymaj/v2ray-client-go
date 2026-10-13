@@ -386,6 +386,8 @@ If you turn the sync off or change the address-list name, the app stops looking 
 
 After a failed sync the app tries again on its own, at most 5 minutes later. Saving the settings unchanged does not make it try sooner (a save that changes nothing does nothing); change a field, for example the list name and back, if you do not want to wait.
 
+If you pass `ROS_URL`, `ROS_USER` and `ROS_PASS` as envs (section 5), the RouterOS card in Settings is switched off and its fields, the pin among them, are greyed out. Switch the card on to enter the pin; the form then also asks for the URL and the user, so type the same ones. The envs still decide what is used. Until the pin is saved the sync runs unpinned and the log says so.
+
 ## 10. Kill switch
 
 What should happen to proxied traffic when no proxy works? The app and the router each handle one half of the answer.

@@ -142,7 +142,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
   "allowPrivateServers": false,  // let untrusted clients use private/CGNAT server addresses; omitted = false
   "routeros": { "enabled": true, "url": "https://172.17.0.1", "user": "v2ray",
                 "password": "", "passwordSet": true, "addressList": "no-proxy",
-                "certSha256": "" }   // hex SHA-256 of the router's certificate (colons allowed); "" = not verified
+                "certSha256": "" }   // hex SHA-256 of the router's certificate (colons and spaces allowed); "" = not verified
 }
 ```
 
