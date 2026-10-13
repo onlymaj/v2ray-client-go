@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -350,5 +352,29 @@ func TestStaleCheckNotRecordedOnReenabledClient(t *testing.T) {
 	}
 	if st := c.CheckNow(context.Background(), "x"); st.LastError != "new failure" {
 		t.Fatalf("fresh check: %+v", st)
+	}
+}
+
+// Round 18: every due check waited for a slot in a goroutine of its own, so
+// 1000 clients of a subscription whose servers stall were 1000 goroutines.
+func TestDueChecksDoNotAllGetAGoroutine(t *testing.T) {
+	stall := &fakeProber{delay: time.Hour}
+	c := New(func(string) Prober { return stall }, Options{Timeout: time.Minute})
+	var ids []string
+	for i := range 1000 {
+		ids = append(ids, "sub"+strconv.Itoa(i))
+	}
+	c.SetClients(ids, func(string) bool { return true })
+	base := runtime.NumGoroutine()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	peak := 0
+	for end := time.Now().Add(startSpread + 500*time.Millisecond); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		peak = max(peak, runtime.NumGoroutine()-base)
+	}
+	if peak < maxConcurrent || peak > maxQueued+8 {
+		t.Fatalf("%d goroutines for 1000 stalling clients, want about %d", peak, maxQueued)
 	}
 }

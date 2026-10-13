@@ -550,7 +550,7 @@ func DecodeSubscription(body []byte) Result {
 	if n, err := enc.Decode(dec, body); err == nil && bytes.Contains(dec[:n], []byte("://")) {
 		return ParseBulk(string(dec[:n]))
 	}
-	return ParseBulk("")
+	return Result{Skipped: 1} // neither links nor base64 of links
 }
 
 // decodeBase64 accepts any of the four base64 variants, ignoring whitespace.

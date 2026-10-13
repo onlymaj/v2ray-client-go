@@ -567,7 +567,7 @@ func exchangeOn(ctx context.Context, c net.Conn, query []byte) ([]byte, error) {
 		return nil, err
 	}
 	for {
-		resp, err := readMsg(c, 0xffff)
+		resp, err := readMsg(c, maxAnswer)
 		if err != nil {
 			return nil, err
 		}
@@ -664,6 +664,13 @@ func (s *Server) reapIdle(ctx context.Context) {
 // bytes; the rest of a larger one would be held in memory while it waits and
 // then sent upstream through the proxy.
 const maxQuery = 4096
+
+// maxAnswer bounds an upstream answer. readMsg grows with the bytes that
+// arrive, but an upstream behind a hostile server could still send all but
+// the last byte of 64 KiB and hold that for each of the 64 queries in
+// flight (round 18). Answers of this size do not occur in practice; a
+// larger one fails the query (SERVFAIL).
+const maxAnswer = 16 << 10
 
 func readMsg(r io.Reader, limit int) ([]byte, error) {
 	var l [2]byte

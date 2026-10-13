@@ -50,7 +50,11 @@ func NewClient(baseURL, user, pass string, insecure bool, certSHA256 string) *Cl
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, VerifyConnection: pinVerifier(certSHA256)}
 	}
 	tr.MaxIdleConnsPerHost = 2
-	return newClient(baseURL, user, pass, &http.Client{Transport: tr, Timeout: 10 * time.Second})
+	// No redirects: the REST API sends none, and one would carry the
+	// request, perhaps with the password, to an address of the answerer's
+	// choice (round 18).
+	return newClient(baseURL, user, pass, &http.Client{Transport: tr, Timeout: 10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
 }
 
 // pinVerifier returns a tls.Config.VerifyConnection that accepts only a
@@ -83,18 +87,36 @@ func newClient(baseURL, user, pass string, hc *http.Client) *Client {
 
 // List returns the entries of address list name.
 func (c *Client) List(ctx context.Context, name string) ([]Entry, error) {
-	var all []Entry
-	if err := c.do(ctx, http.MethodGet, "/ip/firewall/address-list?list="+url.QueryEscape(name), nil, &all); err != nil {
+	var raw json.RawMessage
+	if err := c.do(ctx, http.MethodGet, "/ip/firewall/address-list?list="+url.QueryEscape(name), nil, &raw); err != nil {
 		return nil, err
 	}
-	out := all[:0]
-	for _, e := range all { // the filter is server-side too, but be sure
-		if e.List == name {
+	// One entry at a time, and not more than maxListed: a reply of
+	// "[{},{},...]" within the size limit became a slice of 350,000
+	// entries, 33 MiB, held for the whole pass (round 18).
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+		return nil, errors.New("routeros: address list reply is not a JSON array")
+	}
+	var out []Entry
+	for n := 0; dec.More(); n++ {
+		if n == maxListed {
+			return nil, fmt.Errorf("routeros: address list %q has more than %d entries", clean(name), maxListed)
+		}
+		var e Entry
+		if err := dec.Decode(&e); err != nil {
+			return nil, fmt.Errorf("routeros: decoding address list: %s", clean(err.Error()))
+		}
+		if e.List == name { // the filter is server-side too, but be sure
 			out = append(out, e)
 		}
 	}
 	return out, nil
 }
+
+// maxListed is how many entries of the address list are read. The app
+// writes at most 2048; the rest is room for the admin's own.
+const maxListed = 8192
 
 // Add creates an entry. An "already have such entry" failure counts as
 // success.

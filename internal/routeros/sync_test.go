@@ -489,3 +489,70 @@ func TestSyncErrorsAreShortAndOneLine(t *testing.T) {
 		t.Fatalf("error is %d bytes: %.300q", len(msg), msg)
 	}
 }
+
+// Round 18: a 1 MiB reply of "[{},{},...]" was decoded into 350,000
+// entries, 33 MiB, kept for the whole pass.
+func TestListStopsAtEntryLimit(t *testing.T) {
+	n := maxListed + 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("[" + strings.Repeat("{},", n-1) + "{}]"))
+	}))
+	defer srv.Close()
+	c := newClient(srv.URL, "u", "p", srv.Client())
+	if _, err := c.List(context.Background(), "no-proxy"); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Fatalf("list of %d entries: %v", n, err)
+	}
+	n = 3
+	if got, err := c.List(context.Background(), "no-proxy"); err != nil || len(got) != 0 {
+		t.Fatalf("short list: %v %v", got, err)
+	}
+}
+
+// Round 18: the client followed redirects, so an answerer without a pinned
+// certificate could send the app's requests, and on the same host its
+// password, anywhere the container reaches.
+func TestClientDoesNotFollowRedirects(t *testing.T) {
+	var hits atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1); w.Write([]byte("[]")) }))
+	defer other.Close()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/x", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "u", "p", true, "")
+	if _, err := c.List(context.Background(), "no-proxy"); err == nil {
+		t.Fatal("redirected reply accepted")
+	}
+	if hits.Load() != 0 {
+		t.Fatal("redirect followed")
+	}
+}
+
+// Round 18: a router that stopped answering after the list was read got
+// every write of the pass, 10 s each, for up to 2048 addresses.
+func TestReconcileEndsWhenRouterStopsAnswering(t *testing.T) {
+	var writes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Write([]byte("[]"))
+			return
+		}
+		writes.Add(1)
+		c, _, _ := w.(http.Hijacker).Hijack()
+		c.Close() // no reply
+	}))
+	defer srv.Close()
+	var desired []string
+	for i := range 200 {
+		desired = append(desired, fmt.Sprintf("203.0.113.%d", i+1))
+	}
+	s := New(Options{Logf: func(string, ...any) {}})
+	_, err := s.reconcile(context.Background(), newClient(srv.URL, "u", "p", srv.Client()), "no-proxy", desired, true)
+	if err == nil || !strings.Contains(err.Error(), "pass ended early") {
+		t.Fatalf("err %v", err)
+	}
+	// The HTTP client may retry a request on a closed connection.
+	if n := writes.Load(); n > 4*maxLost {
+		t.Fatalf("%d writes sent to a router that does not answer", n)
+	}
+}

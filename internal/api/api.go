@@ -184,6 +184,15 @@ func (s *server) routes() {
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength != 0 && !s.auth.valid(r) {
+		// Without a session nothing but the login reads a body (the UI
+		// files never do), and
+		// net/http reads an unread one before it sends the reply: a
+		// request that announced a body and never sent it held its
+		// headers until the read timeout on every refusal (round 18).
+		// The login takes this off again once it has its body.
+		w.Header().Set("Connection", "close")
+	}
 	if r.URL.Path != "/api" && !strings.HasPrefix(r.URL.Path, "/api/") {
 		if s.web == nil {
 			http.NotFound(w, r)
@@ -302,6 +311,10 @@ func writeError(w http.ResponseWriter, err error) {
 
 func decode(r *http.Request, v any) error {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			return errf(http.StatusRequestEntityTooLarge, "request body over %d KiB", mbe.Limit>>10)
+		}
 		return errf(http.StatusBadRequest, "invalid JSON: %v", err)
 	}
 	return nil

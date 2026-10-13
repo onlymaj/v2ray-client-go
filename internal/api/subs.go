@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -122,17 +123,26 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	if sub == nil {
 		return config.Subscription{}, errf(http.StatusNotFound, "subscription not found")
 	}
-	s.subMu.Lock()
-	body, ferr := s.fetch(r.Context(), sub.URL)
 	var res share.Result
-	if ferr == nil {
-		res = s.usable(share.DecodeSubscription(body))
-		if ferr = tooManyLinks(res); ferr == nil && len(res.Clients) == 0 {
-			ferr = fmt.Errorf("no supported links (%d errors, %d skipped)", len(res.Errors), res.Skipped)
+	ferr := func() error {
+		s.subMu.Lock()
+		defer s.subMu.Unlock() // deferred: a panic must not leave it held
+		if err := r.Context().Err(); err != nil {
+			return err // the browser left while this one waited its turn
 		}
-	}
-	body = nil // not kept through the config save below
-	s.subMu.Unlock()
+		body, err := s.fetch(r.Context(), sub.URL)
+		if err != nil {
+			return err
+		}
+		res = s.usable(share.DecodeSubscription(body))
+		if err := tooManyLinks(res); err != nil {
+			return err
+		}
+		if len(res.Clients) == 0 {
+			return fmt.Errorf("no supported links (%d errors, %d skipped)", len(res.Errors), res.Skipped)
+		}
+		return nil
+	}()
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	var out config.Subscription
@@ -215,6 +225,22 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		out = *sp
 		return nil
 	})
+	var he *httpError
+	if errors.As(err, &he) && he.code == http.StatusBadRequest {
+		// The new clients do not fit the config (over the client limit,
+		// for one). Recorded like a failed download: before round 18 the
+		// request failed and the subscription showed nothing.
+		msg := err.Error()
+		err = s.update(func(cfg *config.Config) error {
+			sp := findSub(cfg, id)
+			if sp == nil {
+				return errf(http.StatusNotFound, "subscription not found")
+			}
+			sp.LastUpdate, sp.LastError = now, clip(msg, maxLastError)
+			out = *sp
+			return nil
+		})
+	}
 	if err != nil {
 		return config.Subscription{}, err
 	}

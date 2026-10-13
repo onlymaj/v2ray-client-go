@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -441,19 +442,50 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 	// can bring 2048 addresses, and each can fail or change on every pass.
 	var errs []error
 	var added, removed int
-	for _, e := range stale {
-		if err := c.Remove(ctx, e.ID); err != nil {
+	// A router that stopped answering ends the pass: 2048 writes of 10 s
+	// each would keep it (and the old URL and password, after a settings
+	// change) going for hours (round 18). The next pass starts over.
+	s.mu.Lock()
+	gen := s.gen
+	s.mu.Unlock()
+	lost := 0
+	giveUp := func(err error) bool {
+		var ue *url.Error
+		if err != nil && errors.As(err, &ue) {
+			lost++
+		}
+		s.mu.Lock()
+		changed := s.gen != gen
+		s.mu.Unlock()
+		return lost >= maxLost || changed || ctx.Err() != nil
+	}
+	for i, e := range stale {
+		err := c.Remove(ctx, e.ID)
+		if err != nil {
 			errs = append(errs, err)
 			owned++
 		} else {
 			removed++
+		}
+		if giveUp(err) {
+			owned += len(stale) - i - 1
+			return owned, passEnded(errs)
 		}
 	}
 	for _, a := range desired {
 		if present[a] {
 			continue
 		}
-		if err := c.Add(ctx, Entry{List: list, Address: a, Comment: OwnerComment}); err != nil {
+		err := c.Add(ctx, Entry{List: list, Address: a, Comment: OwnerComment})
+		if giveUp(err) {
+			if err != nil {
+				errs = append(errs, err)
+			} else {
+				owned++
+			}
+			return owned, passEnded(errs)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		} else {
 			owned++
@@ -464,6 +496,16 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 		s.opts.Logf("routeros: %s: added %d, removed %d", list, added, removed)
 	}
 	return owned, firstErrs(errs)
+}
+
+// maxLost is how many requests of one pass may fail without a reply.
+const maxLost = 3
+
+func passEnded(errs []error) error {
+	if err := firstErrs(errs); err != nil {
+		return fmt.Errorf("pass ended early: %w", err)
+	}
+	return errors.New("pass ended early: the settings changed")
 }
 
 // maxErrsShown is how many errors of one pass are reported.

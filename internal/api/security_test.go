@@ -142,6 +142,28 @@ func TestSubscriptionCap(t *testing.T) {
 	}
 }
 
+// Round 18: a subscription within the link limit that does not fit beside
+// the clients already there was answered 400 after it had been saved, and
+// showed neither an error nor a date.
+func TestSubscriptionOverClientLimitIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	e.expect("POST", "/api/import", map[string]string{"text": manyLinks(t, 600)}, 200, nil)
+	var b strings.Builder
+	for i := range 600 {
+		b.WriteString(link(t, "n", fmt.Sprintf("s%d.example", i), 443, u1) + "\n")
+	}
+	e.setSub("http://sub.example/more", b.String())
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/more"}, 201, &sub)
+	if !strings.Contains(sub.LastError, "too many clients") || sub.LastUpdate == "" || sub.Count != 0 {
+		t.Fatalf("sub %+v", sub)
+	}
+	if cfg := e.store.Get(); len(cfg.Clients) != 600 || len(cfg.Subscriptions) != 1 || cfg.Subscriptions[0].LastError == "" {
+		t.Fatalf("%d clients, subscriptions %+v", len(cfg.Clients), cfg.Subscriptions)
+	}
+}
+
 func newHandler(t *testing.T, hosts ...string) http.Handler {
 	st, _ := config.Open(filepath.Join(t.TempDir(), "c.json"))
 	h, err := New(Options{Store: st, AdminPassword: "pw", AllowedHosts: hosts})
@@ -661,6 +683,39 @@ func TestLoginDoesNotWaitForBody(t *testing.T) {
 	}
 }
 
+// Round 18: the round-17 guard was in the login only. Every other refusal
+// without a session (401, 403, 415, 404) left the announced body unread, and
+// net/http waited for it until the server's read timeout before replying.
+func TestRefusalsDoNotWaitForBody(t *testing.T) {
+	e := newEnv(t)
+	addr := e.srv.Listener.Addr().String()
+	for name, tc := range map[string]struct{ req, want string }{
+		"no session":      {"POST /api/clients HTTP/1.1\r\nHost: " + addr + "\r\nContent-Type: application/json\r\n", "401"},
+		"content type":    {"POST /api/login HTTP/1.1\r\nHost: " + addr + "\r\nContent-Type: text/plain\r\n", "415"},
+		"cross origin":    {"POST /api/login HTTP/1.1\r\nHost: " + addr + "\r\nOrigin: http://evil.example\r\nContent-Type: application/json\r\n", "403"},
+		"unknown path":    {"POST /api/nothing HTTP/1.1\r\nHost: " + addr + "\r\nContent-Type: application/json\r\n", "40"},
+		"ui path":         {"POST / HTTP/1.1\r\nHost: " + addr + "\r\n", ""},
+		"get with a body": {"GET /api/clients HTTP/1.1\r\nHost: " + addr + "\r\n", "401"},
+	} {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(c, "%sContent-Length: 30\r\n\r\n", tc.req)
+		c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		line, err := bufio.NewReader(c).ReadString('\n')
+		c.Close()
+		if err != nil || !strings.HasPrefix(line, "HTTP/1.1 "+tc.want) {
+			t.Errorf("%s: %q %v, want %s at once", name, line, err, tc.want)
+		}
+	}
+	// A login that does send its body keeps its connection.
+	resp, _ := e.do("POST", "/api/login", map[string]string{"password": "s3cret"})
+	if resp.StatusCode != 204 || resp.Close {
+		t.Fatalf("login: status %d close %v", resp.StatusCode, resp.Close)
+	}
+}
+
 // Round 17: a few megabytes of "[{},{},...]" were decoded into over a
 // million rules before the count was checked. Only the link import takes a
 // large body.
@@ -668,7 +723,15 @@ func TestJSONBodyCap(t *testing.T) {
 	e := newEnv(t)
 	e.login()
 	big := json.RawMessage("[" + strings.Repeat("{},", maxJSONBody/3) + "{}]")
-	e.expect("PUT", "/api/rules", big, 400, nil)
+	e.expect("PUT", "/api/rules", big, 413, nil)
+	// Round 18: the line above was refused for its rule count with or
+	// without the cap. This body is valid apart from its size.
+	vals := make([]string, maxJSONBody/16+1)
+	for i := range vals {
+		vals[i] = fmt.Sprintf("h%09d.example", i)
+	}
+	e.expect("PUT", "/api/rules", []router.Rule{{Type: "domain", Values: vals, Target: router.Target{Kind: "direct"}}}, 413, nil)
+	e.expect("PUT", "/api/rules", []router.Rule{{Type: "domain", Values: vals[:100], Target: router.Target{Kind: "direct"}}}, 200, nil)
 	e.expect("POST", "/api/import", map[string]string{"text": strings.Repeat("# not a link\n", maxJSONBody/10)}, 200, nil)
 }
 

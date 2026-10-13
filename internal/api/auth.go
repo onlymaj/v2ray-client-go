@@ -332,6 +332,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	w.Header().Del("Connection") // set by ServeHTTP for the unread body
 	ip := clientIP(r)
 	if ok, wait := s.auth.begin(ip); !ok {
 		logLogin("login refused by the rate limit", ip)

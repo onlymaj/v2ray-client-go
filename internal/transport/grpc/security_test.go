@@ -761,6 +761,14 @@ func TestIdleSharedConnIsClosed(t *testing.T) {
 	if closed.Load() == 0 {
 		t.Fatal("idle shared connection still open after 3 s")
 	}
+	// Round 18: the closed connection is also let go of, not kept until
+	// the next dial.
+	cl.mu.Lock()
+	held := cl.cc != nil || cl.raw != nil || cl.idle != nil || cl.streams != 0
+	cl.mu.Unlock()
+	if held {
+		t.Fatal("client still refers to the connection it closed")
+	}
 	probe()
 	if n := dials.Load(); n != 2 {
 		t.Fatalf("%d dials, want 2 (a new connection after the idle one closed)", n)

@@ -58,6 +58,13 @@ func TestSettingsValidation(t *testing.T) {
 		t.Fatalf("valid settings refused: %v", err)
 	}
 	for name, mut := range map[string]func(*Settings){
+		// Round 18: these were saved and the sync then failed, or sent the
+		// password in clear text past a pin, with nothing in the UI.
+		"routeros url no scheme": func(s *Settings) { s.RouterOS.URL = "172.17.0.1" },
+		"routeros pin over http": func(s *Settings) {
+			s.RouterOS.URL, s.RouterOS.CertSHA256 = "http://172.17.0.1", strings.Repeat("ab", 32)
+		},
+		"routeros no list":      func(s *Settings) { s.RouterOS.Enabled, s.RouterOS.AddressList = true, "" },
 		"socks on the ui port":  func(s *Settings) { s.Ports.SOCKS = s.Ports.UI },
 		"dns on the http port":  func(s *Settings) { s.Ports.HTTP, s.Ports.DNS = 8118, 8118 },
 		"ui port 0":             func(s *Settings) { s.Ports.UI = 0 },

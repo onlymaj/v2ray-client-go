@@ -348,7 +348,7 @@ If you enable it, give the app a dedicated user with as few rights as RouterOS a
 
 - Do **not** add the `api` policy. It opens the binary API (port 8728) to this user, which REST does not need. If your build has no `rest-api` policy, update RouterOS.
 - `address=172.17.0.2/32` on the user means the credentials work only from the container, even if they leak. Without `address=` on `www-ssl`, enabling it also opens WebFig over HTTPS to the whole LAN.
-- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3 (keep `in-interface=br-containers`). The traffic never leaves the router, but the password crosses the veth in cleartext. Do not open `www` to the LAN for this purpose.
+- **Alternative: plain HTTP on the container bridge only.** Enable `www` with `address=172.17.0.2/32`, set `ROS_URL=http://172.17.0.1`, and accept TCP 80 from `172.17.0.2` instead of 443 in the input rule from section 3 (keep `in-interface=br-containers`). The traffic never leaves the router, but the password crosses the veth in cleartext. Leave `certSha256` empty in this case: the app refuses a pin together with an `http://` URL in its settings, because a pin does nothing without TLS. Do not open `www` to the LAN for this purpose.
 
 ### Pin the certificate (`certSha256`)
 
@@ -424,7 +424,7 @@ add chain=forward action=reject reject-with=tcp-reset dst-address=172.17.0.2 pro
 
 Both rules match only new connections (`connection-state=new`). Without that, the second rule would also reset the replies to the container's own outgoing connections, which arrive with the destination `172.17.0.2`, and nothing would be proxied. The second rule also blocks the SOCKS and HTTP ports if you enable them. Proxied traffic is not affected: it is routed to the container with its original destination address, not addressed to `172.17.0.2`. DNS (port 53) stays open for option A in section 8.
 
-The SOCKS5 and HTTP CONNECT inbounds are **off by default** (port 0). They have no authentication and can connect to any address, including the router's own services at `172.17.0.1`. A connection through them reaches the router with the container's address, which gets around the `address=172.17.0.2/32` limit on the REST user. Enable them (settings `ports.socks` / `ports.http`, then restart) only if you need them, and allow them only from trusted hosts with a forward rule like the one above.
+The SOCKS5 and HTTP CONNECT inbounds are **off by default** (port 0). They have no authentication and can connect to any address. The container refuses its own address and its gateway `172.17.0.1`, but it cannot know the router's other addresses (its LAN and WAN addresses): a connection through these inbounds to one of them reaches the router with the container's source address, which would get around the `address=172.17.0.2/32` limit on the REST user. Only the input rules of section 3 stop that, so keep them limited to `dst-address=172.17.0.1` and do not add the containers bridge to the `LAN` interface list. Enable them (settings `ports.socks` / `ports.http`, then restart) only if you need them, and allow them only from trusted hosts with a forward rule like the one above.
 
 ### Private server addresses (`allowPrivateServers`)
 

@@ -108,3 +108,36 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 	}
 }
+
+type headerSpy struct {
+	http.ResponseWriter
+	r    *http.Request
+	seen int
+}
+
+func (s *headerSpy) Write(p []byte) (int, error) {
+	s.seen = len(s.r.Header)
+	return s.ResponseWriter.Write(p)
+}
+
+// Round 18: a client that asked for a UI file with 8 KiB of headers and
+// never read the reply kept all of them parsed (about 170 KB) for as long
+// as the write was blocked. Only the headers serving a file reads are kept.
+func TestRequestHeadersDroppedBeforeTheBodyIsWritten(t *testing.T) {
+	h := New(fstest.MapFS{"index.html": {Data: []byte("<html>")}, "assets/a.js.gz": {Data: gz("js")}})
+	for _, p := range []string{"/", "/assets/a.js"} {
+		req := httptest.NewRequest("GET", p, nil)
+		for i := range 1000 {
+			req.Header.Set("X-"+strings.Repeat("a", i%20)+string(rune('a'+i%26))+string(rune('a'+i/26%26)), "")
+		}
+		req.Header.Set("Accept-Encoding", "gzip")
+		spy := &headerSpy{ResponseWriter: httptest.NewRecorder(), r: req}
+		h.ServeHTTP(spy, req)
+		if spy.seen == 0 || spy.seen > len(servedHeaders) {
+			t.Errorf("%s: %d request headers held while the body is written", p, spy.seen)
+		}
+	}
+	if r := get(h, "/assets/a.js", "gzip"); r.Header.Get("Content-Encoding") != "gzip" {
+		t.Error("gzip no longer negotiated")
+	}
+}

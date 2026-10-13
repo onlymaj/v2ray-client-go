@@ -657,3 +657,16 @@ func TestMalformedResponseNotAnswered(t *testing.T) {
 		t.Fatal("malformed query not answered")
 	}
 }
+
+// Round 18: an upstream answer could still be 64 KiB, held by each of the
+// 64 queries in flight while its last byte was kept back.
+func TestUpstreamAnswerSizeBounded(t *testing.T) {
+	big := append([]byte{0xff, 0xff}, make([]byte, 0xffff)...)
+	if _, err := readMsg(bytes.NewReader(big), maxAnswer); err == nil {
+		t.Fatal("64 KiB upstream answer accepted")
+	}
+	ok := append([]byte{maxAnswer >> 8, 0}, make([]byte, maxAnswer)...)
+	if m, err := readMsg(bytes.NewReader(ok), maxAnswer); err != nil || len(m) != maxAnswer {
+		t.Fatalf("%d-byte answer refused: %v", maxAnswer, err)
+	}
+}

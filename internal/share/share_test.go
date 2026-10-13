@@ -165,3 +165,14 @@ func TestInsecureParamsIgnored(t *testing.T) {
 		t.Errorf("export carries allowInsecure: %s", link)
 	}
 }
+
+// Round 18: text that is neither links nor base64 of links came back as an
+// empty result since round 17, so the import and the subscription error
+// said "0 skipped" about a page of junk.
+func TestDecodeSubscriptionJunkIsCounted(t *testing.T) {
+	for _, in := range []string{"<html>not found</html>", "bm90IGEgbGluaw=="} {
+		if r := DecodeSubscription([]byte(in)); len(r.Clients) != 0 || r.Skipped != 1 {
+			t.Errorf("%q: %+v", in, r)
+		}
+	}
+}

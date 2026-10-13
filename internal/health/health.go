@@ -215,11 +215,25 @@ func (c *Checker) Run(ctx context.Context) {
 		wait := time.Minute
 		var due []string
 		c.mu.Lock()
+		// Not more than maxQueued started per lane: each waits in its own
+		// goroutine for a slot, and 1000 clients of a subscription whose
+		// servers stall were 1000 goroutines (round 18). The rest stay
+		// due and are picked up as these finish.
+		var queued [2]int
+		for _, e := range c.clients {
+			if e.running {
+				queued[lane(e)]++
+			}
+		}
 		for id, e := range c.clients {
 			if e.running {
 				continue
 			}
 			if !e.next.After(now) {
+				if queued[lane(e)] >= maxQueued {
+					continue
+				}
+				queued[lane(e)]++
 				e.running = true
 				due = append(due, id)
 			} else if d := e.next.Sub(now); d < wait {
@@ -249,6 +263,16 @@ func (c *Checker) CheckNow(ctx context.Context, id string) Status {
 	e := c.clients[id]
 	c.mu.Unlock()
 	return c.check(ctx, id, c.nowSem, e)
+}
+
+// maxQueued is how many scheduled checks of one lane run or wait at a time.
+const maxQueued = 16
+
+func lane(e *entry) int {
+	if e.low {
+		return 1
+	}
+	return 0
 }
 
 // run is a scheduled check; it reschedules the client when done.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -384,5 +385,43 @@ func TestReadRequestHead(t *testing.T) {
 		if _, _, err := readRequestHead(bufio.NewReader(strings.NewReader(bad))); err == nil {
 			t.Errorf("%q: accepted", bad)
 		}
+	}
+}
+
+// Round 18: accepted sockets kept the kernel's growing send buffer, up to
+// 4 MiB of kernel memory per connection for a device that stopped reading.
+func TestAcceptedConnBuffersAreBounded(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	got := make(chan [2]int, 1)
+	go serve(ctx, ln, func(c net.Conn) {
+		defer c.Close()
+		var v [2]int
+		rc, _ := c.(*net.TCPConn).SyscallConn()
+		rc.Control(func(fd uintptr) {
+			v[0], _ = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_SNDBUF)
+			v[1], _ = syscall.GetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF)
+		})
+		got <- v
+	})
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	select {
+	case v := <-got:
+		// The kernel doubles the request and applies its own floor.
+		for _, n := range v {
+			if n <= 0 || n > 2*outbound.LANBuf {
+				t.Fatalf("SO_SNDBUF %d, SO_RCVBUF %d, want at most %d", v[0], v[1], 2*outbound.LANBuf)
+			}
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("connection not handled")
 	}
 }

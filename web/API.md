@@ -64,7 +64,7 @@ The mock accepts the password `admin`.
 }
 ```
 
-`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (4 MB). A group may not list a member twice.
+`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (4 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -99,7 +99,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 | GET | `/api/subscriptions` | — | `[Subscription]` |
 | POST | `/api/subscriptions` | `{"name", "url"}` (if `name` is empty, the server uses the URL host) | `201 Subscription`. The server fetches the URL immediately. |
 | DELETE | `/api/subscriptions/:id` | — | `204`. The server also deletes the clients that came from this subscription, with the same cleanup as `DELETE /api/clients/:id`. |
-| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
+| POST | `/api/subscriptions/:id/refresh` | — | `Subscription`. A fetch failure is not an HTTP error: the response is still `200`, with `lastError` set. The same goes for a subscription whose clients do not fit the config (over the limit of 1000 clients, for one): nothing changes and `lastError` says why. Clients that are no longer in the subscription are deleted, except those a rule targets directly: deleting them would delete the rule and let that traffic follow later rules. They are kept, counted in `count`, and `note` says how many were kept. |
 
 ## Groups
 
@@ -154,6 +154,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 
 - `GET` always returns `"password": ""`, plus `"passwordSet": true|false` to show whether a password is stored.
 - `PUT` with `"password": ""` (or with no `password` field) keeps the stored password. `PUT` with a non-empty value replaces it.
+- `routeros.url`, when not empty, must be an `http` or `https` URL with a host, and `https` when `certSha256` is set. `addressList` may not be empty while `enabled` is true. Other values get 400. (An empty `url` is allowed: `ROS_URL` can supply it.)
 - The server ignores `passwordSet` on `PUT`. Changing `url` or `user` without sending a new password clears the stored password; nothing else does.
 
 ## Stats

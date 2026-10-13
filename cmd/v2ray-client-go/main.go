@@ -248,6 +248,11 @@ func run() error {
 		Handler:           ui,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
 		IdleTimeout: 30 * time.Second,
+		// A reply nobody reads must end: without this a request for a UI
+		// file from a client that never read it stayed for ever, with its
+		// headers (round 18). Long enough for a queued subscription
+		// refresh; the SSE handler clears it for itself.
+		WriteTimeout: 2 * time.Minute,
 		// net/http adds 4 KiB to this. A parsed header costs about 14 times
 		// its size and is held while a request waits, also before login.
 		MaxHeaderBytes: 4 << 10,

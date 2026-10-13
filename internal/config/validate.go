@@ -101,7 +101,7 @@ func (c *Config) Validate() error {
 func (s *Settings) repair() []string {
 	var fixed []string
 	def := Default().Settings
-	for range 4 { // each pass fixes the one field validate complains about
+	for range 6 { // each pass fixes the one field validate complains about
 		err := s.validate()
 		if err == nil {
 			break
@@ -113,6 +113,8 @@ func (s *Settings) repair() []string {
 			s.Ports = def.Ports
 		case strings.HasPrefix(msg, "dnsUpstream"):
 			s.DNSUpstream = def.DNSUpstream
+		case strings.HasPrefix(msg, "routeros"):
+			s.RouterOS.Enabled, s.RouterOS.URL = false, def.RouterOS.URL
 		case strings.HasPrefix(msg, "healthUrl"):
 			s.HealthURL = def.HealthURL
 		}
@@ -144,6 +146,19 @@ func (s *Settings) validate() error {
 	}
 	if ap, err := netip.ParseAddrPort(s.DNSUpstream); err != nil || ap.Port() == 0 {
 		return errors.New("dnsUpstream must be ip:port")
+	}
+	// An empty URL is allowed: ROS_URL can supply it.
+	if r := s.RouterOS; r.URL != "" {
+		u, err := url.Parse(r.URL)
+		if err != nil || len(r.URL) > 2048 || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "" {
+			return errors.New("routeros url must be an http or https URL")
+		}
+		if u.Scheme == "http" && r.CertSHA256 != "" {
+			return errors.New("routeros url must be https when certSha256 is set: over http the certificate is never checked and the password is sent in clear text")
+		}
+	}
+	if r := s.RouterOS; r.Enabled && r.AddressList == "" {
+		return errors.New("routeros addressList is required when the sync is enabled")
 	}
 	if s.HealthURL != "" { // empty selects the default URL
 		u, err := url.Parse(s.HealthURL)

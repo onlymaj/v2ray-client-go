@@ -73,6 +73,9 @@ func setSecurityHeaders(hd http.Header) {
 	hd.Set("Referrer-Policy", "no-referrer")
 }
 
+// servedHeaders are the request headers serving a file reads.
+var servedHeaders = []string{"Accept-Encoding", "Range", "If-Range", "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since"}
+
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w.Header())
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -80,6 +83,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Only these are needed from here on. The rest (up to 8 KiB on the
+	// wire, about 14 times that parsed) would otherwise be held for as
+	// long as the client takes to read the file (round 18).
+	kept := make(http.Header, len(servedHeaders))
+	for _, k := range servedHeaders {
+		if v := r.Header[k]; len(v) > 0 {
+			kept[k] = v[:1]
+		}
+	}
+	r.Header = kept
 	name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
 	if name == "" {
 		name = "index.html"

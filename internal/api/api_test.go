@@ -481,7 +481,7 @@ func TestSettingsPasswordWriteOnly(t *testing.T) {
 	}
 	// Changing the URL (or user) without a new password drops the stored
 	// one, so it is never sent to a server the admin did not enter it for.
-	ros["url"] = "http://evil.example"
+	ros["url"] = "https://evil.example"
 	e.expect("PUT", "/api/settings", raw, 200, &raw)
 	if st := e.store.Get().Settings.RouterOS; st.Password != "" || raw["routeros"].(map[string]any)["passwordSet"] != false {
 		t.Fatalf("password kept after url change: %+v", st)

@@ -60,6 +60,24 @@ func Lookup(protocol string) (Factory, error) {
 	return f, nil
 }
 
+// LANBuf is the socket buffer size, in each direction, of a connection
+// accepted from the LAN. Left alone, the kernel grows the send buffer to
+// tcp_wmem's maximum (4 MiB by default), so a device that stopped reading a
+// download had that much queued for it in kernel memory, outside every
+// limit counted in this program (round 18). The kernel doubles what is
+// asked for. The LAN has almost no round-trip time, so this costs no speed.
+// The sockets to the far side are left to the kernel: a fixed buffer there
+// would bound the rate to about buffer / round-trip time.
+const LANBuf = 128 << 10
+
+// LANBuffers sets the buffers of an accepted connection.
+func LANBuffers(c net.Conn) {
+	if t, ok := c.(*net.TCPConn); ok {
+		t.SetReadBuffer(LANBuf)
+		t.SetWriteBuffer(LANBuf)
+	}
+}
+
 // Direct dials the destination without a proxy.
 type Direct struct{ net.Dialer }
 

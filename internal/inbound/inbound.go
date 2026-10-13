@@ -175,6 +175,7 @@ func serve(ctx context.Context, ln net.Listener, handle func(net.Conn)) error {
 			c.Close()
 			continue
 		}
+		outbound.LANBuffers(c)
 		go func() {
 			defer release(s)
 			handle(c)
