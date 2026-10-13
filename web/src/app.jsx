@@ -25,8 +25,10 @@ const routes = [
   [/^\/clients$/, Clients],
   [/^\/clients\/new$/, ClientEdit],
   [/^\/clients\/import$/, Import],
-  [/^\/clients\/(?<id>[^/]+)\/edit$/, ClientEdit],
-  [/^\/clients\/(?<id>[^/]+)$/, ClientDetail],
+  // Ids are hex or "default". Anything else never reaches an API path: a
+  // link with "..\\groups\\x" as the id loaded a group into the client form.
+  [/^\/clients\/(?<id>[0-9A-Za-z_-]+)\/edit$/, ClientEdit],
+  [/^\/clients\/(?<id>[0-9A-Za-z_-]+)$/, ClientDetail],
   [/^\/groups$/, Groups],
   [/^\/rules$/, Rules],
   [/^\/connections$/, Connections],

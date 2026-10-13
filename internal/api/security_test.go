@@ -899,3 +899,12 @@ func TestRepliesAreNotHTMLEscaped(t *testing.T) {
 		t.Fatalf("client list: %.300s", body)
 	}
 }
+
+// Round 22: the subscription fetch could negotiate HTTP/2, whose stream
+// window lets the server queue 4 MiB of the body beyond the cap on it.
+func TestFetchIsHTTP1Only(t *testing.T) {
+	tr := fetchClient("sub.example").Transport.(*http.Transport)
+	if tr.ForceAttemptHTTP2 || tr.TLSNextProto == nil || len(tr.TLSNextProto) != 0 {
+		t.Fatalf("ForceAttemptHTTP2 %v, TLSNextProto %v; want HTTP/2 off", tr.ForceAttemptHTTP2, tr.TLSNextProto)
+	}
+}

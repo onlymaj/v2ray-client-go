@@ -251,3 +251,39 @@ func TestConfigSizeLimits(t *testing.T) {
 		t.Fatalf("%d memberships: %v", len(c.Groups)*5, err)
 	}
 }
+
+// Round 22: Open decoded the file into Default(), so the file's first rule
+// was merged into the default rule and a first rule to "direct" came back
+// with the default rule's target id.
+func TestOpenDoesNotMergeIntoTheDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.Update(func(c *Config) error {
+		c.Rules = append([]router.Rule{{ID: "r1", Type: "source", Values: []string{"192.168.88.50"}, Target: router.Target{Kind: router.KindDirect}}}, c.Rules...)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := s.Get().Rules; len(r) != 2 || r[0].Target != (router.Target{Kind: router.KindDirect}) || r[1].Target.ID != "default" {
+		t.Fatalf("rules after reopening: %+v", r)
+	}
+	// A file without the lists still gets the default group and rule.
+	if err := os.WriteFile(path, []byte(`{"settings":{"healthInterval":30}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := s.Get(); len(c.Groups) != 1 || len(c.Rules) != 1 || c.Clients == nil || c.Settings.HealthInterval != 30 || c.Settings.Ports.UI != 80 {
+		t.Fatalf("config from a file with settings only: %+v", c)
+	}
+}

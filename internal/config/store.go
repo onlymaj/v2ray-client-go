@@ -65,9 +65,26 @@ func Open(path string) (*Store, error) {
 	case err != nil:
 		return nil, err
 	}
-	c := Default()
+	// Only the settings start from the defaults, for fields the file does
+	// not have. Decoding into Default() merged the file's first rule into
+	// the default rule, and a first rule to "direct" or "block" came back
+	// with the default rule's target id (round 22).
+	def := Default()
+	c := &Config{Settings: def.Settings}
 	if err := json.Unmarshal(data, c); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if c.Clients == nil {
+		c.Clients = def.Clients
+	}
+	if c.Groups == nil {
+		c.Groups = def.Groups
+	}
+	if c.Rules == nil {
+		c.Rules = def.Rules
+	}
+	if c.Subscriptions == nil {
+		c.Subscriptions = def.Subscriptions
 	}
 	for _, msg := range c.Settings.repair() {
 		log.Printf("config: %s", msg)

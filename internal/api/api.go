@@ -12,6 +12,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -401,6 +402,10 @@ func fetchClient(origHost string) *http.Client {
 	// The default is 10 MB of response headers, per hop; the body is
 	// capped separately.
 	tr.MaxResponseHeaderBytes = 64 << 10
+	// HTTP/1.1 only: an HTTP/2 stream may hold 4 MiB of the body beyond
+	// what has been read, past the cap on it (round 22).
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
