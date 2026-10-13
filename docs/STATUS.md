@@ -84,5 +84,6 @@ In the order I would do them.
 - `POST /api/clients/:id/toggle` flips the flag, so a request sent twice undoes itself. Round 25.
 - With an unset clock (the router after a power cut) TLS to the proxy servers and VMess fail until the time is set; only the health probe allows for it. Check on the device what clock RouterOS starts with. Round 25.
 - Build: `make image` embeds whatever `web/dist` holds, or a placeholder, without failing; the extracted `.tools/upx` is checked only when downloaded; the Dockerfile copies the whole `web/dist`, not only the `.gz` files. Round 25.
+- A client's `alpn` is kept, shown and exported but not sent: under a browser fingerprint (always, here) the hello offers the browser's own list, as in Xray. Only WebSocket (`http/1.1`) and TCP with exactly `http/1.1` differ. This is a setting that is not honoured without being refused, against the project's rule, because links with `alpn=h2` are common and refusing them would refuse working servers; the form and `web/API.md` say so. Round 26.
 - Share links with raw Unicode host names are rejected; the punycode form works.
 - Not supported and refused at import: VLESS encryption, Reality `pqv`, legacy VMess (`alterId` above 0).

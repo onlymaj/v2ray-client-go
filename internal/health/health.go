@@ -488,39 +488,42 @@ func probe(ctx context.Context, p Prober, u *probeURL) (time.Duration, error) {
 	return d, nil
 }
 
-// clockFloor is a date before this code was written. A clock that shows an
-// earlier one has not been set: the router has no battery clock and starts
-// in the past after a power cut.
-var clockFloor = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-
 var staleClockLog sync.Once
 
-// probeTLS is the TLS config of a probe at time now. With an unset clock
-// the probe's certificate, weeks old, is "not yet valid": every client was
+// probeTLS is the TLS config of a probe at time now. The router has no
+// battery clock and starts in the past after a power cut. The probe's
+// certificate, weeks old, was then "not yet valid": every client was
 // marked down, the kill switch applied, and where the router resolves the
 // NTP server's name through the container it could never set the clock
-// (round 25). The chain and the name are then still checked, at a time
-// within the certificate's validity.
+// (round 25). When the usual check fails only because now is before the
+// certificate's validity, the chain and the name are checked again at a
+// time within it. A certificate that has expired by the local clock is
+// never accepted. (A fixed "before 2026" test missed a router that
+// restores its last saved time, round 26.)
 func probeTLS(host string, now time.Time) *tls.Config {
-	cfg := &tls.Config{ServerName: host}
-	if !now.Before(clockFloor) {
-		return cfg
-	}
-	staleClockLog.Do(func() {
-		log.Printf("health: the clock shows %s and is not set; probe certificates are checked without their dates until it is", now.UTC().Format("2006-01-02"))
-	})
-	cfg.InsecureSkipVerify = true // VerifyConnection does it, at another time
+	cfg := &tls.Config{ServerName: host, InsecureSkipVerify: true} // VerifyConnection does it
 	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		if len(cs.PeerCertificates) == 0 {
 			return errors.New("health: no server certificate")
 		}
 		leaf := cs.PeerCertificates[0]
-		opts := x509.VerifyOptions{DNSName: host, Roots: cfg.RootCAs, Intermediates: x509.NewCertPool(), CurrentTime: leaf.NotBefore.Add(time.Hour)}
+		opts := x509.VerifyOptions{DNSName: host, Roots: cfg.RootCAs, Intermediates: x509.NewCertPool(), CurrentTime: now}
 		for _, c := range cs.PeerCertificates[1:] {
 			opts.Intermediates.AddCert(c)
 		}
 		_, err := leaf.Verify(opts)
-		return err
+		var inv x509.CertificateInvalidError
+		if err == nil || !errors.As(err, &inv) || inv.Reason != x509.Expired || !now.Before(leaf.NotBefore) {
+			return err
+		}
+		opts.CurrentTime = leaf.NotBefore.Add(time.Hour)
+		if _, err := leaf.Verify(opts); err != nil {
+			return err
+		}
+		staleClockLog.Do(func() {
+			log.Printf("health: the clock shows %s, before the probe certificate was issued, so it is not set; probe certificates are checked without their start dates until it is", now.UTC().Format("2006-01-02"))
+		})
+		return nil
 	}
 	return cfg
 }

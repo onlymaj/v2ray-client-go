@@ -103,7 +103,7 @@ func New(settings []byte) (transport.Layer, error) {
 // the handshake is deferred until the first Write.
 func (l *layer) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if l.ed > 0 {
-		return &delayConn{Conn: conn, l: l, dialed: make(chan struct{}), rdl: deadline{cancel: make(chan struct{})}}, nil
+		return &delayConn{Conn: conn, l: l, dialed: make(chan struct{}), rdl: deadline{cancel: make(chan struct{})}, born: time.Now()}, nil
 	}
 	return l.handshake(ctx, conn, nil)
 }
@@ -440,6 +440,10 @@ func (c *Conn) Close() error {
 	return c.Conn.Close()
 }
 
+// probeAfter is how long a delayConn must have waited before its first
+// Write probes it. Xray's server closes after 4 s.
+const probeAfter = time.Second
+
 // earlyDataError is a failed handshake whose request carried early data.
 // The server may have taken the request and passed the data on before the
 // failure, so a caller must not send that data again on another connection
@@ -464,23 +468,33 @@ type delayConn struct {
 	err    error
 	rdl    deadline // read deadline while waiting for the handshake
 
-	dlMu sync.Mutex
-	rdlT time.Time // the caller's read deadline, put back after probe
+	born time.Time // when Wrap returned it; probe is for conns that waited
+
+	// dlMu orders the caller's deadlines and probe's own on the raw conn.
+	dlMu    sync.Mutex
+	rdlT    time.Time // the caller's read deadline, put back after probe
+	probing bool      // probe's deadline is on the raw conn
 }
 
 func (d *delayConn) SetDeadline(t time.Time) error {
 	d.rdl.set(t)
 	d.dlMu.Lock()
+	defer d.dlMu.Unlock()
 	d.rdlT = t
-	d.dlMu.Unlock()
+	if d.probing { // probe puts the read deadline on when it is done
+		return d.Conn.SetWriteDeadline(t)
+	}
 	return d.Conn.SetDeadline(t)
 }
 
 func (d *delayConn) SetReadDeadline(t time.Time) error {
 	d.rdl.set(t)
 	d.dlMu.Lock()
+	defer d.dlMu.Unlock()
 	d.rdlT = t
-	d.dlMu.Unlock()
+	if d.probing {
+		return nil
+	}
 	return d.Conn.SetReadDeadline(t)
 }
 
@@ -492,13 +506,16 @@ func (d *delayConn) SetReadDeadline(t time.Time) error {
 // handshake, it is an earlyDataError, and a plaintext first payload is
 // then not sent again, so every such connection failed (round 25).
 func (d *delayConn) probe() error {
+	d.dlMu.Lock()
+	d.probing = true
 	d.Conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+	d.dlMu.Unlock()
 	var b [1]byte
 	n, err := d.Conn.Read(b[:])
 	d.dlMu.Lock()
-	t := d.rdlT
+	d.probing = false
+	d.Conn.SetReadDeadline(d.rdlT)
 	d.dlMu.Unlock()
-	d.Conn.SetReadDeadline(t)
 	if n > 0 {
 		return errors.New("ws: data from the server before the handshake")
 	}
@@ -523,9 +540,13 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		defer cancel()
 		stop := context.AfterFunc(ctx, func() { d.Conn.Close() })
 		defer stop()
-		if d.err = d.probe(); d.err != nil {
-			close(d.dialed)
-			return
+		// Only a conn that has waited: a fresh one cannot have been
+		// closed for being idle.
+		if time.Since(d.born) > probeAfter {
+			if d.err = d.probe(); d.err != nil {
+				close(d.dialed)
+				return
+			}
 		}
 		d.ws, d.err = d.l.handshake(context.Background(), d.Conn, ed)
 		if d.err != nil && ed != nil {

@@ -85,7 +85,8 @@ func TestDefaults(t *testing.T) {
 		netKey  string
 		netVal  string
 	}{
-		{"tcp", func(c *config.Client) {}, []any{"h2", "http/1.1"}, "", "", ""},
+		// nil: the fingerprint's own list, h2 and http/1.1 for Chrome.
+		{"tcp", func(c *config.Client) {}, nil, "", "", ""},
 		{"ws", func(c *config.Client) { c.Network = "ws" }, []any{"http/1.1"}, "ws", "host", "example.com"},
 		{"ws host", func(c *config.Client) { c.Network, c.SNI, c.Host = "ws", "sni.test", "h.test" },
 			[]any{"http/1.1"}, "ws", "host", "h.test"},
@@ -93,10 +94,13 @@ func TestDefaults(t *testing.T) {
 			[]any{"http/1.1"}, "ws", "host", "sni.test"},
 		// Round 25: gRPC offered h2 alone in a Chrome hello, which no
 		// Chrome sends; Xray keeps the browser's list.
-		{"grpc", func(c *config.Client) { c.Network, c.SNI = "grpc", "sni.test" }, []any{"h2", "http/1.1"}, "grpc", "authority", "sni.test"},
-		{"grpc explicit h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"h2"} }, []any{"h2"}, "grpc", "authority", "example.com"},
-		{"grpc forced h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"http/1.1"} },
-			[]any{"h2", "http/1.1"}, "grpc", "authority", "example.com"},
+		{"grpc", func(c *config.Client) { c.Network, c.SNI = "grpc", "sni.test" }, nil, "grpc", "authority", "sni.test"},
+		// Round 26: a configured list was still written into the hello;
+		// alpn=h2 is common on gRPC links.
+		{"grpc explicit h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"h2"} }, nil, "grpc", "authority", "example.com"},
+		{"tcp explicit h2", func(c *config.Client) { c.ALPN = []string{"h2"} }, nil, "", "", ""},
+		{"grpc alpn without h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"http/1.1"} },
+			nil, "grpc", "authority", "example.com"},
 		{"explicit alpn", func(c *config.Client) { c.ALPN = []string{"http/1.1"} }, []any{"http/1.1"}, "", "", ""},
 		// Round 12: a ws client with alpn h2 offered h2; a server choosing it
 		// broke the HTTP/1.1 upgrade on every dial. Xray forces http/1.1.

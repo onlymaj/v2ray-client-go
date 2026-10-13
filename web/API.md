@@ -40,7 +40,7 @@ The mock accepts the password `admin`.
   "tls": "reality",             // "none" | "tls" | "reality" (reality is vless only)
   "sni": "www.microsoft.com",
   "fingerprint": "chrome",      // "chrome" | "firefox" | "safari" | "random". "firefox" and "safari" are the hellos of Firefox 120 and Safari 16.0 (2022-2023), rare on the wire now; "random" is "chrome" until newer ones are available
-  "alpn": ["h2", "http/1.1"],   // tls only; ignored for ws (always http/1.1); grpc always includes h2
+  "alpn": ["h2", "http/1.1"],   // tls only. Kept and exported, but not sent: the TLS hello is the browser's and offers the browser's list, h2 and http/1.1 (as Xray does under a fingerprint). Exceptions: ws always offers http/1.1 alone, and tcp with exactly ["http/1.1"] offers that
   "allowInsecure": false,       // tls only; never taken from share links or subscriptions
   "publicKey": "...",           // reality: required
   "shortId": "6f42d83d",        // reality: hex, 0-16 chars

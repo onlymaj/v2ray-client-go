@@ -801,7 +801,8 @@ func TestIdleUpstreamsAreBounded(t *testing.T) {
 // escape sequences, enough to forge log lines.
 func TestLogTextIsOneShortLine(t *testing.T) {
 	got := logText("x509: certificate is valid for a.example\n2026/10/13 00:00:00 FORGED \x1b[31m" + strings.Repeat("n", 40000))
-	if len(got) > 310 || strings.ContainsAny(got, "\n\x1b") {
+	got += logText("grpc: status 2: a\u009b31m b\u2028c\u0085d")
+	if len(got) > 400 || strings.ContainsAny(got, "\n\x1b\u009b\u2028\u0085") {
 		t.Fatalf("%d bytes: %.80q", len(got), got)
 	}
 }

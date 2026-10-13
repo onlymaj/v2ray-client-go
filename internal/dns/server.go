@@ -43,6 +43,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
@@ -666,7 +667,10 @@ func logText(s string) string {
 		s = s[:300]
 	}
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+		// IsPrint also excludes the C1 controls and the Unicode line
+		// separators, which a gRPC server can put into its status
+		// message (round 26).
+		if !unicode.IsPrint(r) || r == utf8.RuneError {
 			return ' '
 		}
 		return r

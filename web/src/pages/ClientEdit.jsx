@@ -139,7 +139,7 @@ export function ClientEdit({ id }) {
           )}
           {c.tls === 'tls' && (
             <>
-              <Field label="ALPN" hint={c.network === 'ws' ? 'Not used with WebSocket, which always offers http/1.1' : c.network === 'grpc' ? 'Comma separated. h2 is always offered with gRPC' : 'Comma separated, e.g. h2,http/1.1'}>
+              <Field label="ALPN" hint={c.network === 'ws' ? 'Not used with WebSocket, which always offers http/1.1' : "Kept for export but not sent: the hello offers the browser's own list, h2 and http/1.1. Only http/1.1 alone, with TCP, is sent as written."}>
                 <Input value={c.alpn.join(',')} onInput={(e) => set('alpn')(e.currentTarget.value.split(',').map((s) => s.trim()).filter(Boolean))} />
               </Field>
               <SwitchField label="Allow insecure" hint="Skips certificate verification: anyone on the network path can intercept the connection and read the traffic. Links and subscriptions never set this." checked={c.allowInsecure} onChange={set('allowInsecure')} />

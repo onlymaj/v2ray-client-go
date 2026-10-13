@@ -44,8 +44,21 @@ func TestProbeTLSWithAnUnsetClock(t *testing.T) {
 	if _, err := cert.Verify(x509.VerifyOptions{DNSName: "probe.example", Roots: roots, CurrentTime: unset}); err == nil {
 		t.Fatal("the certificate verifies in 1970; the test proves nothing")
 	}
-	if cfg := probeTLS("probe.example", time.Now()); cfg.InsecureSkipVerify || cfg.VerifyConnection != nil {
-		t.Fatal("with the clock set, the probe must use the normal check")
+	// Round 26: the unset clock was recognised by a date before 2026; a
+	// router that restores its last saved time shows a later one.
+	saved := issued.Add(-30 * 24 * time.Hour)
+	for _, now := range []time.Time{time.Now(), saved} {
+		ok := probeTLS("probe.example", now)
+		ok.RootCAs = roots
+		if err := ok.VerifyConnection(cs); err != nil {
+			t.Fatalf("clock at %s: %v", now.Format("2006-01-02"), err)
+		}
+	}
+	// A certificate that has expired by the local clock is refused.
+	late := probeTLS("probe.example", issued.Add(200*24*time.Hour))
+	late.RootCAs = roots
+	if err := late.VerifyConnection(cs); err == nil {
+		t.Fatal("an expired certificate was accepted")
 	}
 	cfg := probeTLS("probe.example", unset)
 	cfg.RootCAs = roots

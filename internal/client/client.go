@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
-	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -106,23 +105,24 @@ func Build(c config.Client, opts Options) (*Client, error) {
 	switch c.TLS {
 	case "", "none":
 	case "tls":
-		alpn := c.ALPN
+		// The hello is a browser's, and so is its ALPN list: h2 and
+		// http/1.1 for Chrome. A configured list is not written into it,
+		// as in Xray (transport/internet/tls/tls.go, copyConfig drops
+		// NextProtos under a fingerprint): a Chrome hello offering h2
+		// alone, as gRPC links often ask, is one no Chrome sends and
+		// anyone on the path can see it (rounds 25 and 26). nil leaves
+		// the preset's list. gRPC needs h2, which the list has; dialH2
+		// refuses a server that picks http/1.1.
+		var alpn []string
 		switch {
-		case c.Network == "grpc" && len(alpn) == 0:
-			// The browser's own list, as Xray sends with a fingerprint:
-			// a Chrome hello that offers h2 alone is one no Chrome sends
-			// (round 25). dialH2 refuses a server that picks http/1.1.
-			alpn = []string{"h2", "http/1.1"}
-		case c.Network == "grpc" && !slices.Contains(alpn, "h2"):
-			alpn = append([]string{"h2"}, alpn...)
 		case c.Network == "ws":
 			// Always, whatever the config or link says: the WebSocket
 			// upgrade is HTTP/1.1 and fails if the server picks h2. Xray
 			// forces the same (transport/internet/websocket/dialer.go).
 			alpn = []string{"http/1.1"}
-		case len(alpn) > 0:
-		default:
-			alpn = []string{"h2", "http/1.1"}
+		case c.Network != "grpc" && len(c.ALPN) == 1 && c.ALPN[0] == "http/1.1":
+			// Xray's one exception for TCP (transport/internet/tcp/dialer.go).
+			alpn = []string{"http/1.1"}
 		}
 		cl.security, err = layer("tls", map[string]any{
 			"serverName": sni, "fingerprint": fp, "alpn": alpn, "allowInsecure": c.AllowInsecure,
