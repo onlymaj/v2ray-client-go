@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -792,5 +793,15 @@ func TestIdleUpstreamsAreBounded(t *testing.T) {
 	}
 	for _, ic := range s.idle {
 		ic.conn.Close()
+	}
+}
+
+// Round 25: the failed-query log line carried the upstream error whole. A
+// proxy server's certificate names end up in it: 37 KB with newlines and
+// escape sequences, enough to forge log lines.
+func TestLogTextIsOneShortLine(t *testing.T) {
+	got := logText("x509: certificate is valid for a.example\n2026/10/13 00:00:00 FORGED \x1b[31m" + strings.Repeat("n", 40000))
+	if len(got) > 310 || strings.ContainsAny(got, "\n\x1b") {
+		t.Fatalf("%d bytes: %.80q", len(got), got)
 	}
 }

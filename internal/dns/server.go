@@ -43,6 +43,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/onlymaj/v2ray-client-go/internal/outbound"
 )
@@ -445,7 +446,7 @@ func (s *Server) handle(ctx context.Context, src netip.Addr, query []byte) []byt
 			if dropped > 0 {
 				s.opts.Logf("dns: %d more failed queries not logged", dropped)
 			}
-			s.opts.Logf("dns: %s %s from %s: %v", q.Name, typeString(q.Type), src, err)
+			s.opts.Logf("dns: %s %s from %s: %s", q.Name, typeString(q.Type), src, logText(err.Error()))
 		}
 		return errorResponse(query, rcodeServFail)
 	}
@@ -654,6 +655,26 @@ func (s *Server) putIdle(key string, c net.Conn, born time.Time, gen uint64) {
 	if had {
 		old.conn.Close()
 	}
+}
+
+// logText makes an upstream error fit for a log line. It can carry text
+// the proxy server chose: the names of a certificate that does not match
+// were 37 KB with newlines and escape sequences in them (round 25).
+func logText(s string) string {
+	cut := len(s) > 300
+	if cut {
+		s = s[:300]
+	}
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+			return ' '
+		}
+		return r
+	}, s)
+	if cut {
+		s += "..."
+	}
+	return s
 }
 
 // maxIdleUpstreams bounds the pooled upstream connections over all routes.

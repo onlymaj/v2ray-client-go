@@ -39,7 +39,7 @@ The mock accepts the password `admin`.
   "network": "tcp",             // "tcp" | "ws" | "grpc"
   "tls": "reality",             // "none" | "tls" | "reality" (reality is vless only)
   "sni": "www.microsoft.com",
-  "fingerprint": "chrome",      // "chrome" | "firefox" | "safari" | "random"
+  "fingerprint": "chrome",      // "chrome" | "firefox" | "safari" | "random". "firefox" and "safari" are the hellos of Firefox 120 and Safari 16.0 (2022-2023), rare on the wire now; "random" is "chrome" until newer ones are available
   "alpn": ["h2", "http/1.1"],   // tls only; ignored for ws (always http/1.1); grpc always includes h2
   "allowInsecure": false,       // tls only; never taken from share links or subscriptions
   "publicKey": "...",           // reality: required

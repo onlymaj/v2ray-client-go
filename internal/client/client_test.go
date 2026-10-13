@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -90,7 +91,10 @@ func TestDefaults(t *testing.T) {
 			[]any{"http/1.1"}, "ws", "host", "h.test"},
 		{"ws sni", func(c *config.Client) { c.Network, c.SNI = "ws", "sni.test" },
 			[]any{"http/1.1"}, "ws", "host", "sni.test"},
-		{"grpc", func(c *config.Client) { c.Network, c.SNI = "grpc", "sni.test" }, []any{"h2"}, "grpc", "authority", "sni.test"},
+		// Round 25: gRPC offered h2 alone in a Chrome hello, which no
+		// Chrome sends; Xray keeps the browser's list.
+		{"grpc", func(c *config.Client) { c.Network, c.SNI = "grpc", "sni.test" }, []any{"h2", "http/1.1"}, "grpc", "authority", "sni.test"},
+		{"grpc explicit h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"h2"} }, []any{"h2"}, "grpc", "authority", "example.com"},
 		{"grpc forced h2", func(c *config.Client) { c.Network, c.ALPN = "grpc", []string{"http/1.1"} },
 			[]any{"h2", "http/1.1"}, "grpc", "authority", "example.com"},
 		{"explicit alpn", func(c *config.Client) { c.ALPN = []string{"http/1.1"} }, []any{"http/1.1"}, "", "", ""},
@@ -570,3 +574,37 @@ func TestRetryConnCloseEndsTheRedial(t *testing.T) {
 		t.Fatal("the redial outlives Close")
 	}
 }
+
+type h1Conn struct{ net.Conn }
+
+func (h1Conn) NegotiatedProtocol() string { return "http/1.1" }
+func (h1Conn) Close() error               { return nil }
+
+// Round 25: the gRPC hello offers http/1.1 beside h2 now, so a server may
+// choose it; HTTP/2 must not be started on such a connection.
+func TestGRPCRefusesHTTP1(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+		}
+	}()
+	c := &Client{tcp: net.Dialer{}, server: ln.Addr().String(), security: wrapFunc(func(conn net.Conn) (net.Conn, error) {
+		return h1Conn{conn}, nil
+	})}
+	if _, err := c.dialH2(context.Background()); err == nil || !strings.Contains(err.Error(), "http/1.1") {
+		t.Fatalf("dialH2 on a connection that negotiated http/1.1: %v", err)
+	}
+}
+
+type wrapFunc func(net.Conn) (net.Conn, error)
+
+func (f wrapFunc) Wrap(_ context.Context, c net.Conn) (net.Conn, error) { return f(c) }

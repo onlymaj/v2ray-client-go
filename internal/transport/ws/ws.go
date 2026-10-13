@@ -133,7 +133,9 @@ func (l *layer) handshake(ctx context.Context, conn net.Conn, ed []byte) (*Conn,
 		b.WriteString("Sec-WebSocket-Protocol: " + base64.RawURLEncoding.EncodeToString(ed) + "\r\n")
 	}
 	if l.headers.Get("User-Agent") == "" {
-		b.WriteString("User-Agent: Go-http-client/1.1\r\n")
+		// Xray's default; a Go agent behind a Chrome TLS hello is what a
+		// CDN's bot rules look for (round 25).
+		b.WriteString("User-Agent: " + transport.ChromeUA + "\r\n")
 	}
 	for k, vs := range l.headers {
 		for _, v := range vs {

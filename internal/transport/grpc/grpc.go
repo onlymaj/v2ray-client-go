@@ -165,7 +165,8 @@ func New(settings []byte) (transport.Layer, error) {
 	t.WriteByteTimeout = time.Duration(writeTimeout.Load())
 	c.t = t
 	if c.ua == "" {
-		c.ua = "grpc-go/1.73.0"
+		// Xray's default (common/utils/browser.go, ChromeUA).
+		c.ua = transport.ChromeUA
 	}
 	idle, hc := s.IdleTimeout, s.HealthCheckTimeout
 	if idle == 0 {

@@ -108,6 +108,11 @@ func Build(c config.Client, opts Options) (*Client, error) {
 	case "tls":
 		alpn := c.ALPN
 		switch {
+		case c.Network == "grpc" && len(alpn) == 0:
+			// The browser's own list, as Xray sends with a fingerprint:
+			// a Chrome hello that offers h2 alone is one no Chrome sends
+			// (round 25). dialH2 refuses a server that picks http/1.1.
+			alpn = []string{"h2", "http/1.1"}
 		case c.Network == "grpc" && !slices.Contains(alpn, "h2"):
 			alpn = append([]string{"h2"}, alpn...)
 		case c.Network == "ws":
@@ -231,10 +236,24 @@ func (c *Client) dialRaw(ctx context.Context) (net.Conn, error) {
 	return sc, nil
 }
 
+// dialH2 is dialRaw for the gRPC transport: the hello offers http/1.1 too,
+// and a server that chose it cannot carry HTTP/2.
+func (c *Client) dialH2(ctx context.Context) (net.Conn, error) {
+	conn, err := c.dialRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if np, ok := conn.(interface{ NegotiatedProtocol() string }); ok && np.NegotiatedProtocol() == "http/1.1" {
+		conn.Close()
+		return nil, errors.New("grpc: the server chose http/1.1, not h2")
+	}
+	return conn, nil
+}
+
 // dialTransport opens a full, unpooled transport conn.
 func (c *Client) dialTransport(ctx context.Context) (net.Conn, error) {
 	if c.stream != nil {
-		return c.stream.DialStream(ctx, c.dialRaw)
+		return c.stream.DialStream(ctx, c.dialH2)
 	}
 	conn, err := c.dialRaw(ctx)
 	if err != nil || c.network == nil {

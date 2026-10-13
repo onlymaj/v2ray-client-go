@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand/v2"
 	"net"
 
 	utls "github.com/refraction-networking/utls"
@@ -60,11 +59,13 @@ func Fingerprint(name string) (utls.ClientHelloID, error) {
 	case "safari":
 		return utls.HelloSafari_Auto, nil
 	case "random":
-		// Like Xray's "random" preset: one of the browser fingerprints.
-		// (utls.HelloRandomized may offer only TLS 1.2, which breaks
-		// REALITY and Vision.)
-		return [...]utls.ClientHelloID{utls.HelloChrome_Auto, utls.HelloFirefox_Auto,
-			utls.HelloSafari_Auto}[rand.IntN(3)], nil
+		// Chrome, for now. It was one of the three at random, as Xray's
+		// "random" preset is, but in uTLS v1.8.2 the Firefox and Safari
+		// presets are Firefox 120 and Safari 16.0, of 2022 and 2023: the
+		// option chosen to blend in gave a rare hello two times in three
+		// (round 25). (utls.HelloRandomized may offer only TLS 1.2, which
+		// breaks REALITY and Vision.)
+		return utls.HelloChrome_Auto, nil
 	}
 	return utls.ClientHelloID{}, errors.New("tls: unknown fingerprint " + name)
 }

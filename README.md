@@ -7,7 +7,7 @@ Router setup: **[docs/routeros.md](docs/routeros.md)**.
 ## Features
 
 - **Protocols:** VLESS (including XTLS Vision flow) and VMess (AEAD only).
-- **Transports:** TCP, TLS with uTLS fingerprints (Chrome / Firefox / Safari / randomized), Reality, WebSocket (with or without TLS), and gRPC "gun" (`Tun` and `TunMulti`).
+- **Transports:** TCP, TLS with uTLS fingerprints (Chrome; Firefox and Safari are older hellos, see `web/API.md`), Reality, WebSocket (with or without TLS), and gRPC "gun" (`Tun` and `TunMulti`).
 - **Inbounds:**
   - Transparent TCP. The container installs its own nat REDIRECT through nf_tables netlink or legacy x_tables, with no iptables binary, and reads `SO_ORIGINAL_DST`.
   - SOCKS5 and HTTP CONNECT for single hosts.

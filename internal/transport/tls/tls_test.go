@@ -147,6 +147,8 @@ func TestRecordConnFraming(t *testing.T) {
 // Round 12: fingerprint "random" was drawn again for every connection, so
 // one client showed Chrome, Firefox and Safari hellos to the same server
 // seconds apart. It is drawn once per client, as in Xray.
+// Round 25: the Firefox and Safari presets of uTLS v1.8.2 are hellos of
+// 2022 and 2023, so "random" is Chrome until newer ones are there.
 func TestRandomFingerprintStablePerLayer(t *testing.T) {
 	f, err := transport.Lookup("tls")
 	if err != nil {
@@ -164,8 +166,8 @@ func TestRandomFingerprintStablePerLayer(t *testing.T) {
 		}
 		seen[tl.id.Client] = true
 	}
-	if len(seen) < 2 {
-		t.Fatalf("random always picked %v", seen)
+	if len(seen) != 1 || !seen["Chrome"] {
+		t.Fatalf("random picked %v, want Chrome only", seen)
 	}
 }
 
