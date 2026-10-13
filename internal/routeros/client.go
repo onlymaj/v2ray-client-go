@@ -50,6 +50,12 @@ func NewClient(baseURL, user, pass string, insecure bool, certSHA256 string) *Cl
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true, VerifyConnection: pinVerifier(certSHA256)}
 	}
 	tr.MaxIdleConnsPerHost = 2
+	// The default is 10 MB of reply headers, and a parsed header costs
+	// several times its size: 42 MiB were held from one reply (round 19).
+	// HTTP/1.1 only, so that this one limit is the limit.
+	tr.MaxResponseHeaderBytes = maxReplyHeader
+	tr.ForceAttemptHTTP2 = false
+	tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	// No redirects: the REST API sends none, and one would carry the
 	// request, perhaps with the password, to an address of the answerer's
 	// choice (round 18).
@@ -84,6 +90,9 @@ func newClient(baseURL, user, pass string, hc *http.Client) *Client {
 	base := strings.TrimSuffix(strings.TrimRight(baseURL, "/"), "/rest")
 	return &Client{base: base + "/rest", user: user, pass: pass, hc: hc}
 }
+
+// maxReplyHeader bounds the headers of a reply.
+const maxReplyHeader = 16 << 10
 
 // replyError is a refusal the router answered with, as opposed to no
 // answer at all.

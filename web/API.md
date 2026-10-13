@@ -5,10 +5,10 @@ The web UI (`web/`) uses this contract. The Vite mock (`web/mock/`) implements i
 ## Conventions
 
 - All endpoints are under `/api`. Request and response bodies are JSON (`Content-Type: application/json`).
-- Every endpoint except `POST /api/login` requires the session cookie. Without it, the response is `401`.
+- Every endpoint except `POST /api/login` and `POST /api/logout` requires the session cookie. Without it, the response is `401`.
 - Every `POST`, `PUT` and `DELETE` must send `Content-Type: application/json`, including requests with no body (logout, toggle, check, refresh, deletes). Without the header, the response is `415`. This is the CSRF guard: a cross-site form cannot set this header.
 - The server may omit fields whose value is empty (`omitempty`). Clients must treat a missing field as its zero value.
-- Errors have a non-2xx status with the body `{"error": "human readable message"}`. The UI shows `error` to the user. Status codes in use: `400` validation, `401` no or bad session, `404` unknown id, `405` wrong method, `415` missing JSON content type, `409` conflict (for example, deleting a group that a rule uses).
+- Errors have a non-2xx status with the body `{"error": "human readable message"}`. The UI shows `error` to the user. Status codes in use: `400` validation, `401` no or bad session, `404` unknown id, `405` wrong method, `403` request for another host name or from another origin, `413` body too large, `415` missing JSON content type, `429` too many login attempts, `409` conflict (for example, deleting a group that a rule uses).
 - A successful request with no body returns `204`.
 - Times are RFC 3339 strings in UTC. An empty string `""` means never. Rates are bytes per second. Counters are bytes.
 - The server assigns ids (opaque strings). The server ignores ids in POST bodies.
@@ -64,7 +64,7 @@ The mock accepts the password `admin`.
 }
 ```
 
-`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (4 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
+`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (2 MB); a larger one gets 413. That covers the whole rule list of `PUT /api/rules`, about 12,000 domain values. A request without a session that announces a body is answered with `Connection: close`. A group may not list a member twice.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -155,6 +155,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 - `GET` always returns `"password": ""`, plus `"passwordSet": true|false` to show whether a password is stored.
 - `PUT` with `"password": ""` (or with no `password` field) keeps the stored password. `PUT` with a non-empty value replaces it.
 - `routeros.url`, when not empty, must be an `http` or `https` URL with a host, and `https` when `certSha256` is set. `addressList` may not be empty while `enabled` is true. Other values get 400. (An empty `url` is allowed: `ROS_URL` can supply it.)
+- When the container is started with `ROS_URL`, that URL is used and the sync runs whatever `enabled` and `url` say here; they are stored but have no effect. To stop the sync, remove `ROS_URL`.
 - The server ignores `passwordSet` on `PUT`. Changing `url` or `user` without sending a new password clears the stored password; nothing else does.
 
 ## Stats
@@ -168,7 +169,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 | `1h` | 60 | 1 min (average of the minute) |
 | `24h` | 1440 | 1 min |
 
-The arrays are oldest first and all have the same length. `delay` is the health-check delay: `null` when unknown or down, and always `null` for `total`. For a group, `delay` is the delay of its current member.
+The arrays are oldest first and all have the same length. `delay` is the health-check delay: `null` when unknown or down, and always `null` for `total`. It is recorded per client only: for a group it is always `null` too.
 
 ## Connections
 

@@ -73,7 +73,7 @@ type Options struct {
 	// AllowedHosts are extra host names (no port) accepted in the Host
 	// header of /api/ requests, besides IP literals and localhost.
 	AllowedHosts []string
-	// Fetch downloads a subscription. Default: HTTP GET, 30s timeout, 4 MB cap.
+	// Fetch downloads a subscription. Default: HTTP GET, 30s timeout, 2 MB cap.
 	Fetch func(ctx context.Context, url string) ([]byte, error)
 	// CheckClient reports whether a dialer can be built for c (uuid form,
 	// flow, fingerprint, Reality key). Without it, such mistakes are saved
@@ -86,7 +86,7 @@ type Options struct {
 // a few megabytes of "[{},{},...]" decode into over a million rules before
 // any count check.
 const (
-	maxBody     = 4 << 20
+	maxBody     = 2 << 20
 	maxJSONBody = 256 << 10
 )
 

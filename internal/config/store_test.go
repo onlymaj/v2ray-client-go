@@ -189,3 +189,25 @@ func TestOpenRepairsRouterOSSettings(t *testing.T) {
 		}
 	}
 }
+
+// Round 19: the temporary file of a save cut short by a power loss stayed
+// in the config directory for ever.
+func TestOpenRemovesLeftoverTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	left := filepath.Join(dir, ".config-123456.json")
+	other := filepath.Join(dir, "notes.json")
+	for _, f := range []string{left, other} {
+		if err := os.WriteFile(f, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Open(filepath.Join(dir, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(left); !os.IsNotExist(err) {
+		t.Fatalf("leftover temp file still there: %v", err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatalf("an unrelated file was removed: %v", err)
+	}
+}

@@ -94,7 +94,7 @@ The container is configured with environment variables. Everything else is set i
 | `healthUrl`, `healthInterval` | `https://www.gstatic.com/generate_204`, 60 s |
 | `killSwitch` | `block` (or `direct`) |
 | `dnsUpstream` | `1.1.1.1:53`, queried over TCP through the proxy |
-| `routeros` | `url` `https://172.17.0.1`, `addressList` `no-proxy`, `certSha256` empty (no verification), disabled until configured |
+| `routeros` | `url` `https://172.17.0.1`, `addressList` `no-proxy`, `certSha256` empty (no verification), disabled until configured (or always on with `ROS_URL`, which overrides `enabled` and `url`) |
 | `allowPrivateServers` | `false`: subscription clients may not use private/CGNAT server addresses (manually added clients may) |
 
 On first start, the config has an empty failover group called `default` and one default rule that points to it.

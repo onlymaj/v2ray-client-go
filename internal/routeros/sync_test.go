@@ -608,3 +608,19 @@ func TestSavingTheConfigDoesNotEndAPass(t *testing.T) {
 		t.Fatalf("owned %d, err %v", n, err)
 	}
 }
+
+// Round 19: reply headers were limited only by net/http's default of
+// 10 MB, and 2.6 million header lines were 42 MiB while the reply was held.
+func TestReplyHeadersAreBounded(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := range 4 * maxReplyHeader / 16 {
+			w.Header().Set(fmt.Sprintf("X-Pad-%07d", i), "v")
+		}
+		w.Write([]byte("[]"))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "u", "p", true, "")
+	if _, err := c.List(context.Background(), "no-proxy"); err == nil {
+		t.Fatal("a reply with 64 KiB of headers was accepted")
+	}
+}

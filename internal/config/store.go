@@ -24,9 +24,19 @@ type Store struct {
 	notifyMu sync.Mutex // serializes subscriber calls
 }
 
+// tmpPattern names the temporary file of a save.
+const tmpPattern = ".config-*.json"
+
 // Open loads path, or starts from Default() if it doesn't exist yet.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path}
+	// What a save that was cut short (power loss) left behind; each can be
+	// as large as the config, on a small flash (round 19).
+	if old, _ := filepath.Glob(filepath.Join(filepath.Dir(path), tmpPattern)); len(old) > 0 {
+		for _, f := range old {
+			os.Remove(f)
+		}
+	}
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -112,7 +122,7 @@ func (s *Store) write(c *Config) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".config-*.json")
+	tmp, err := os.CreateTemp(dir, tmpPattern)
 	if err != nil {
 		return err
 	}

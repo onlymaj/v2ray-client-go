@@ -778,3 +778,60 @@ func TestRefreshDoesNotWaitForEver(t *testing.T) {
 		t.Fatalf("sub after the wait %+v", sub)
 	}
 }
+
+type deadlineSpy struct {
+	http.ResponseWriter
+	mu        sync.Mutex
+	deadlines []time.Time
+	writes    int
+}
+
+func (d *deadlineSpy) SetWriteDeadline(t time.Time) error {
+	d.mu.Lock()
+	d.deadlines = append(d.deadlines, t)
+	d.mu.Unlock()
+	return nil
+}
+func (d *deadlineSpy) Write(p []byte) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Every write but the stream's opening line has a deadline.
+	if d.writes++; d.writes > 1 && d.deadlines[len(d.deadlines)-1].IsZero() {
+		panic("event written without a write deadline")
+	}
+	return d.ResponseWriter.Write(p)
+}
+func (d *deadlineSpy) Flush() {}
+
+// Round 19: the event stream cleared its write deadline for good, so a
+// client that stopped reading held the handler in a write, its queued
+// events, and the stream past a logout.
+func TestSSEWritesHaveADeadline(t *testing.T) {
+	old := heartbeat
+	heartbeat = 20 * time.Millisecond
+	defer func() { heartbeat = old }()
+	e := newEnv(t)
+	e.login()
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest("GET", "/api/events", nil).WithContext(ctx)
+	req.AddCookie(e.cookie)
+	req.RemoteAddr = "127.0.0.1:1"
+	spy := &deadlineSpy{ResponseWriter: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() { e.h.events(spy, req); close(done) }()
+	time.Sleep(150 * time.Millisecond)
+	cancel()
+	<-done
+	spy.mu.Lock()
+	defer spy.mu.Unlock()
+	if spy.writes < 2 {
+		t.Fatalf("%d writes, want the opening line and heartbeats", spy.writes)
+	}
+}
+
+// Round 19: a link import could be 4 MiB and was held in several copies.
+func TestImportBodyCap(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	e.expect("POST", "/api/import", map[string]string{"text": strings.Repeat("# not a link\n", maxBody/13+1)}, 413, nil)
+}

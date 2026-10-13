@@ -97,6 +97,10 @@ func (s *server) connections(w http.ResponseWriter, r *http.Request) {
 
 var heartbeat = 15 * time.Second
 
+// sseWriteTimeout is how long one event may take to be written. A variable
+// for tests.
+var sseWriteTimeout = 30 * time.Second
+
 // events streams Bus events as server-sent events until the client goes
 // away.
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +121,14 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	}
 	tick := time.NewTicker(heartbeat)
 	defer tick.Stop()
+	// Each write has a deadline of its own: a client that stopped reading
+	// kept the handler in a write for ever, with its queue of events
+	// (traffic events list every client) and past a logout (round 19).
+	write := func(b []byte) error {
+		rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		_, err := w.Write(b)
+		return err
+	}
 	for {
 		var err error
 		select {
@@ -128,7 +140,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			if !s.auth.alive(r) {
 				return
 			}
-			_, err = w.Write([]byte(": hb\n\n"))
+			err = write([]byte(": hb\n\n"))
 		case e, ok := <-ch:
 			if !ok {
 				return
@@ -137,7 +149,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 			if merr != nil {
 				continue
 			}
-			_, err = w.Write([]byte("event: " + e.Type + "\ndata: " + string(data) + "\n\n"))
+			err = write([]byte("event: " + e.Type + "\ndata: " + string(data) + "\n\n"))
 		}
 		if err == nil {
 			err = rc.Flush()
