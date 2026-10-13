@@ -89,6 +89,13 @@ func TestCompileErrors(t *testing.T) {
 		{{ID: "a", Type: "dest", Values: []string{"300.1.1.1/8"}, Target: Target{Kind: KindDirect}}},
 		{{ID: "a", Type: "domain", Values: []string{"*."}, Target: Target{Kind: KindDirect}}},
 		{{ID: "a", Type: "domain", Values: []string{"a.*.com"}, Target: Target{Kind: KindDirect}}},
+		// Round 17: values that can never equal a sniffed name were saved
+		// and the rule silently never matched.
+		{{ID: "a", Type: "domain", Values: []string{".example.com"}, Target: Target{Kind: KindDirect}}},
+		{{ID: "a", Type: "domain", Values: []string{"a.com,b.com"}, Target: Target{Kind: KindDirect}}},
+		{{ID: "a", Type: "domain", Values: []string{"exa\tmple.org"}, Target: Target{Kind: KindDirect}}},
+		{{ID: "a", Type: "domain", Values: []string{"a..com"}, Target: Target{Kind: KindDirect}}},
+		{{ID: "a", Type: "domain", Values: []string{"bücher.example"}, Target: Target{Kind: KindDirect}}},
 		{{ID: "a", Type: "port", Target: Target{Kind: KindDirect}}},
 		{{ID: "a", Type: "dest", Values: []string{"1.1.1.1"}, Target: Target{Kind: KindClient}}},
 		{{ID: "a", Type: "dest", Values: []string{"1.1.1.1"}, Target: Target{Kind: "proxy"}}},

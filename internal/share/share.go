@@ -3,6 +3,7 @@
 package share
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -236,7 +237,13 @@ func ParseVLESS(link string) (Client, error) {
 	if !strings.EqualFold(u.Scheme, "vless") {
 		return Client{}, errors.New("not a vless link")
 	}
-	q := u.Query()
+	// Not u.Query(): it drops what it cannot parse (a pair with ';' or a
+	// bad escape, or everything past 10,000 pairs), and with it settings
+	// the checks below must see, such as security= or pcs=.
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return Client{}, fmt.Errorf("invalid link parameters: %w", err)
+	}
 	// REALITY post-quantum verification (pqv / mldsa65Verify) is not
 	// implemented: refuse rather than silently drop a check the link's
 	// author asked for.
@@ -517,11 +524,33 @@ func ParseBulk(text string) Result {
 // DecodeSubscription parses a subscription body: base64 (std or URL
 // alphabet, padded or not, possibly wrapped) of a newline-separated link
 // list, or the plain list itself.
+//
+// body is modified. A body of megabytes is not copied more often than
+// needed: it came from a server.
 func DecodeSubscription(body []byte) Result {
-	if b, err := decodeBase64(string(body)); err == nil && strings.Contains(string(b), "://") {
-		return ParseBulk(string(b))
+	if bytes.Contains(body, []byte("://")) { // ':' is not in any base64 alphabet
+		return ParseBulk(string(body))
 	}
-	return ParseBulk(string(body))
+	n := 0
+	for _, c := range body {
+		if c != ' ' && c != '\n' && c != '\r' && c != '\t' {
+			body[n] = c
+			n++
+		}
+	}
+	body = body[:n]
+	enc := base64.StdEncoding
+	if bytes.ContainsAny(body, "-_") {
+		enc = base64.URLEncoding
+	}
+	if !bytes.HasSuffix(body, []byte("=")) {
+		enc = enc.WithPadding(base64.NoPadding)
+	}
+	dec := make([]byte, enc.DecodedLen(len(body)))
+	if n, err := enc.Decode(dec, body); err == nil && bytes.Contains(dec[:n], []byte("://")) {
+		return ParseBulk(string(dec[:n]))
+	}
+	return ParseBulk("")
 }
 
 // decodeBase64 accepts any of the four base64 variants, ignoring whitespace.

@@ -55,10 +55,17 @@ func (c *Config) Validate() error {
 		default:
 			return fmt.Errorf("group %q: unknown strategy %q", g.Name, g.Strategy)
 		}
+		seen := map[string]bool{}
 		for _, m := range g.Members {
 			if !clients[m] {
 				return fmt.Errorf("group %q: unknown member %q", g.Name, m)
 			}
+			// The group could not be built and every rule using it would
+			// follow the kill switch (round 17).
+			if seen[m] {
+				return fmt.Errorf("group %q: member %q is listed twice", g.Name, m)
+			}
+			seen[m] = true
 		}
 	}
 	for _, r := range c.Rules {

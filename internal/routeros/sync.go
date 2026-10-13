@@ -220,8 +220,10 @@ func (s *Syncer) Run(ctx context.Context) {
 			}
 			s.mu.Lock()
 			s.status.LastError = ""
-			if err := errors.Join(syncErr, resolveErr); err != nil {
-				s.status.LastError = clean(err.Error())
+			for _, err := range []error{syncErr, resolveErr} {
+				if err != nil {
+					s.status.LastError = strings.TrimSpace(s.status.LastError + " " + clean(err.Error()))
+				}
 			}
 			s.mu.Unlock()
 			wakeAt = nextResolve
@@ -477,7 +479,7 @@ func firstErrs(errs []error) error {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		b.WriteString(err.Error())
+		b.WriteString(clean(err.Error())) // the path and the URL in it can be the router's text too
 	}
 	if n := len(errs) - maxErrsShown; n > 0 {
 		fmt.Fprintf(&b, "; and %d more errors", n)

@@ -247,7 +247,10 @@ func run() error {
 	hs := &http.Server{
 		Handler:           ui,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
-		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+		IdleTimeout: 30 * time.Second,
+		// net/http adds 4 KiB to this. A parsed header costs about 14 times
+		// its size and is held while a request waits, also before login.
+		MaxHeaderBytes: 4 << 10,
 	}
 	uiLn, err := net.Listen("tcp", ":"+strconv.Itoa(int(p.UI)))
 	if err != nil {

@@ -140,7 +140,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return err
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 2048 entries are about 300 KB
 	if err != nil {
 		return err
 	}

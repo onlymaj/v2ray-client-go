@@ -88,8 +88,11 @@ func Compile(rules []Rule) (*Engine, error) {
 				if s, ok := strings.CutPrefix(d, "*."); ok {
 					d, set = s, c.suffix
 				}
-				if d == "" || strings.ContainsAny(d, "*/: ") {
-					return nil, fmt.Errorf("rule %q: invalid domain %q", r.ID, v)
+				// Anything that is not a host name can never equal a
+				// sniffed one, and the rule would silently never match:
+				// ".example.com", "a.com,b.com", a URL (round 17).
+				if !hostName(d) {
+					return nil, fmt.Errorf("rule %q: invalid domain %q (use example.com, or *.example.com for subdomains only)", r.ID, v)
 				}
 				set[d] = struct{}{}
 			}
@@ -134,6 +137,25 @@ func parsePrefix(s string) (netip.Prefix, error) {
 	}
 	a = a.Unmap()
 	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// hostName reports whether d is dot-separated labels of letters, digits,
+// '-' and '_' (lower case: d went through normDomain).
+func hostName(d string) bool {
+	if d == "" || len(d) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(d, ".") {
+		if label == "" {
+			return false
+		}
+		for _, c := range []byte(label) {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normDomain(d string) string {

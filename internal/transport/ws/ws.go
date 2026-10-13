@@ -149,21 +149,66 @@ func (l *layer) handshake(ctx context.Context, conn net.Conn, ed []byte) (*Conn,
 	// the limit is lifted once the handshake is done.
 	hr := &handshakeReader{r: conn, n: maxHandshake}
 	br := bufio.NewReaderSize(hr, 4096)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodGet})
+	status, upgrade, accept, err := readHandshake(br)
 	if err != nil {
 		return nil, fmt.Errorf("ws: handshake: %w", err)
 	}
-	if resp.StatusCode != http.StatusSwitchingProtocols ||
-		!strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") ||
-		resp.Header.Get("Sec-WebSocket-Accept") != acceptKey(key) {
-		return nil, fmt.Errorf("ws: handshake: bad response %q", resp.Status)
+	if status != http.StatusSwitchingProtocols || !strings.EqualFold(upgrade, "websocket") || accept != acceptKey(key) {
+		return nil, fmt.Errorf("ws: handshake: bad response (HTTP %d)", status) // not the status text: it is the server's
 	}
 	hr.n = -1
 	return &Conn{Conn: conn, br: br}, nil
 }
 
-// maxHandshake bounds the bytes read for the handshake response.
-const maxHandshake = 64 << 10
+// maxHandshake bounds the bytes read for the handshake response. A real one
+// is a few hundred bytes, some more behind a CDN.
+const maxHandshake = 16 << 10
+
+// readHandshake reads the response head (RFC 9112 sections 4 and 5) and
+// returns the status code and the two header values the handshake needs.
+// Nothing else is kept: http.ReadResponse builds a header map of about 15
+// times the wire size, and a server that never ended the head made every
+// handshake hold a megabyte until the dial timeout. A line must fit br's
+// buffer, or it is skipped.
+func readHandshake(br *bufio.Reader) (status int, upgrade, accept string, err error) {
+	line, err := br.ReadSlice('\n')
+	if err != nil {
+		return 0, "", "", err
+	}
+	// "HTTP/1.1 101 Switching Protocols"
+	f := strings.Fields(string(line))
+	if len(f) < 2 || !strings.HasPrefix(f[0], "HTTP/1.") || len(f[1]) != 3 {
+		return 0, "", "", errors.New("malformed response")
+	}
+	if status, err = strconv.Atoi(f[1]); err != nil {
+		return 0, "", "", errors.New("malformed response")
+	}
+	for {
+		if line, err = br.ReadSlice('\n'); err == bufio.ErrBufferFull {
+			// A long header is not one of ours; the total is capped.
+			if err = skipLine(br); err != nil {
+				return 0, "", "", err
+			}
+			continue
+		} else if err != nil {
+			return 0, "", "", err
+		}
+		l := strings.TrimRight(string(line), "\r\n")
+		if l == "" {
+			return status, upgrade, accept, nil
+		}
+		k, v, ok := strings.Cut(l, ":")
+		if !ok {
+			return 0, "", "", errors.New("malformed response header")
+		}
+		switch v = strings.TrimSpace(v); {
+		case strings.EqualFold(k, "Upgrade"):
+			upgrade = v
+		case strings.EqualFold(k, "Sec-WebSocket-Accept"):
+			accept = v
+		}
+	}
+}
 
 var errHandshakeTooLarge = errors.New("ws: handshake response too large")
 
@@ -186,6 +231,16 @@ func (h *handshakeReader) Read(p []byte) (int, error) {
 	n, err := h.r.Read(p)
 	h.n -= int64(n)
 	return n, err
+}
+
+// skipLine reads the rest of a header line that did not fit br's buffer.
+func skipLine(br *bufio.Reader) error {
+	for {
+		_, err := br.ReadSlice('\n')
+		if err != bufio.ErrBufferFull {
+			return err
+		}
+	}
 }
 
 // acceptKey computes Sec-WebSocket-Accept (RFC 6455 section 4.2.2 step 5.4).

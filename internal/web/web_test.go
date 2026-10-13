@@ -93,6 +93,14 @@ func TestSecurityHeaders(t *testing.T) {
 	h := New(fstest.MapFS{"index.html": {Data: []byte("<html>")}})
 	for _, p := range []string{"/", "/clients/abc", "/assets/missing.js"} {
 		r := get(h, p, "")
+		// The whole policy (round 17: only frame-ancestors was checked, so
+		// dropping script-src, the XSS defence, passed).
+		csp := "; " + r.Header.Get("Content-Security-Policy") + ";"
+		for _, d := range []string{"default-src 'self'", "script-src 'self'", "connect-src 'self'", "base-uri 'none'", "form-action 'self'"} {
+			if !strings.Contains(csp, "; "+d+";") {
+				t.Fatalf("%s: CSP lacks %q: %s", p, d, csp)
+			}
+		}
 		if !strings.Contains(r.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") ||
 			r.Header.Get("X-Frame-Options") != "DENY" || r.Header.Get("X-Content-Type-Options") != "nosniff" ||
 			r.Header.Get("Referrer-Policy") != "no-referrer" {

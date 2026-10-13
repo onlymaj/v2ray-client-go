@@ -7,6 +7,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 
 	"github.com/onlymaj/v2ray-client-go/internal/group"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
@@ -54,8 +55,14 @@ type Client struct {
 
 // FromShare converts a parsed share link into a new, enabled client.
 func FromShare(s share.Client) Client {
+	name := s.Name
+	if strings.TrimSpace(name) == "" {
+		// A link need not carry a name, but the UI lists and selects
+		// clients by it.
+		name = s.Address
+	}
 	return Client{
-		ID: NewID(), Name: s.Name, Enabled: true,
+		ID: NewID(), Name: name, Enabled: true,
 		Protocol: s.Protocol, Address: s.Address, Port: s.Port, UUID: s.ID,
 		Flow: s.Flow, Security: s.Security, Network: s.Network, TLS: s.TLS,
 		SNI: s.SNI, Fingerprint: s.Fingerprint, ALPN: s.ALPN, AllowInsecure: s.AllowInsecure,

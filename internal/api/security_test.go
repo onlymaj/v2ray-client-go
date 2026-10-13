@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -394,6 +396,19 @@ func TestSessionIdleTimeout(t *testing.T) {
 // Round 8: a subscription server's status line (megabytes of it) was stored
 // as the subscription's lastError and written to config.json on every save.
 func TestFetchErrorIsClipped(t *testing.T) {
+	// Through the refresh itself (round 17: the test only called clip, so
+	// removing the call in refresh failed nothing).
+	e := newEnv(t)
+	e.login()
+	e.setSub("http://sub.example/err", "ERR:"+strings.Repeat("x", 5000))
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/err"}, 201, &sub)
+	if n := len(sub.LastError); n == 0 || n > maxLastError+3 {
+		t.Fatalf("stored lastError is %d bytes, limit %d", n, maxLastError)
+	}
+	if got := e.store.Get().Subscriptions[0].LastError; len(got) > maxLastError+3 {
+		t.Fatalf("saved lastError is %d bytes", len(got))
+	}
 	if got := clip(strings.Repeat("x", 5000), maxLastError); len(got) > maxLastError+3 {
 		t.Fatalf("clip kept %d bytes", len(got))
 	}
@@ -614,5 +629,57 @@ func TestFetchRefusesLargeHeaders(t *testing.T) {
 	defer srv.Close()
 	if b, err := defaultFetch(context.Background(), srv.URL); err == nil {
 		t.Fatalf("fetch with 1 MiB of response headers succeeded (%d bytes)", len(b))
+	}
+}
+
+// Round 17: a login request that announced a body and never sent it waited
+// for the server's 30 s read timeout with its parsed headers in memory,
+// about 280 KB per connection before any password. It is answered at once
+// when the length is missing or too large, and after loginReadTimeout
+// otherwise.
+func TestLoginDoesNotWaitForBody(t *testing.T) {
+	old := loginReadTimeout
+	loginReadTimeout = 200 * time.Millisecond
+	defer func() { loginReadTimeout = old }()
+	e := newEnv(t)
+	for name, head := range map[string]string{
+		"body never sent": "Content-Length: 30\r\n",
+		"chunked":         "Transfer-Encoding: chunked\r\n",
+		"too long":        "Content-Length: 100000\r\n",
+	} {
+		c, err := net.Dial("tcp", e.srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(c, "POST /api/login HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\n%s\r\n", e.srv.Listener.Addr(), head)
+		c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		line, err := bufio.NewReader(c).ReadString('\n')
+		c.Close()
+		if err != nil || !strings.HasPrefix(line, "HTTP/1.1 400") {
+			t.Errorf("%s: %q %v, want a 400 within the read timeout", name, line, err)
+		}
+	}
+}
+
+// Round 17: a few megabytes of "[{},{},...]" were decoded into over a
+// million rules before the count was checked. Only the link import takes a
+// large body.
+func TestJSONBodyCap(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	big := json.RawMessage("[" + strings.Repeat("{},", maxJSONBody/3) + "{}]")
+	e.expect("PUT", "/api/rules", big, 400, nil)
+	e.expect("POST", "/api/import", map[string]string{"text": strings.Repeat("# not a link\n", maxJSONBody/10)}, 200, nil)
+}
+
+// Round 17: links without a name were stored with an empty one and showed
+// as blank rows and blank options in the rule and group selects.
+func TestImportedClientGetsAName(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	e.expect("POST", "/api/import", map[string]string{"text": strings.TrimSuffix(link(t, "", "noname.example", 443, u1), "#")}, 200, nil)
+	cs := e.store.Get().Clients
+	if len(cs) != 1 || cs[0].Name != "noname.example" {
+		t.Fatalf("clients %+v", cs)
 	}
 }

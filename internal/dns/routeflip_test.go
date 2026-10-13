@@ -1,9 +1,12 @@
 package dns
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/netip"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,5 +102,40 @@ func TestInFlightQueryAcrossFlushNotPooledOrCached(t *testing.T) {
 	s.handle(ctx, src, q)
 	if n := up.queries.Load(); n != 2 {
 		t.Fatalf("upstream queries %d, want 2 (later answers are cached again)", n)
+	}
+}
+
+type lenOnly struct{ sent bool }
+
+func (r *lenOnly) Read(p []byte) (int, error) {
+	if r.sent {
+		return 0, io.EOF
+	}
+	r.sent = true
+	return copy(p, []byte{0xff, 0xff}), nil
+}
+
+// Round 17: an upstream answer was allocated from its 2-byte length (up to
+// 64 KiB) before any of it arrived.
+func TestReadMsgAllocatesAsBytesArrive(t *testing.T) {
+	if n := testing.AllocsPerRun(1, func() {}); n != 0 {
+		t.Skip()
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range 16 {
+		if _, err := readMsg(&lenOnly{}, 0xffff); err == nil {
+			t.Fatal("truncated message accepted")
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if d := after.TotalAlloc - before.TotalAlloc; d > 16*(4<<10) {
+		t.Fatalf("16 length-only answers allocated %d bytes", d)
+	}
+	msg := make([]byte, 2+5000)
+	msg[0], msg[1] = 5000>>8, 5000&0xff
+	msg[2+4999] = 7
+	if got, err := readMsg(bytes.NewReader(msg), 0xffff); err != nil || len(got) != 5000 || got[4999] != 7 {
+		t.Fatalf("5000-byte message: len %d err %v", len(got), err)
 	}
 }

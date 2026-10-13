@@ -6,7 +6,9 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -63,5 +65,80 @@ func TestHandshakeHeaderLimit(t *testing.T) {
 	defer cancel()
 	if _, err := l.Wrap(ctx, a); !errors.Is(err, errHandshakeTooLarge) {
 		t.Fatalf("err = %v, want %v", err, errHandshakeTooLarge)
+	}
+}
+
+// Round 17: the handshake response was parsed into a header map, about 15
+// times its wire size; a server sending small distinct headers and never
+// the blank line made every handshake hold about 1 MiB until the dial
+// timeout. Only the two headers the handshake needs are kept now.
+func TestStalledHandshakeHoldsLittle(t *testing.T) {
+	l, err := New([]byte(`{"path":"/"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var head strings.Builder
+	head.WriteString("HTTP/1.1 101 Switching Protocols\r\n")
+	for i := 0; head.Len() < maxHandshake-64; i++ {
+		fmt.Fprintf(&head, "%x:\r\n", i)
+	}
+	const n = 16
+	var conns []net.Conn
+	done := make(chan struct{}, n)
+	sent := make(chan struct{}, n)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range n {
+		a, b := net.Pipe()
+		conns = append(conns, a, b)
+		go func() {
+			br := bufio.NewReader(b)
+			for {
+				if line, err := br.ReadString('\n'); err != nil || line == "\r\n" {
+					break
+				}
+			}
+			b.Write([]byte(head.String()))
+			sent <- struct{}{}
+		}()
+		go func() { l.Wrap(context.Background(), a); done <- struct{}{} }()
+	}
+	for range n {
+		<-sent
+	}
+	time.Sleep(50 * time.Millisecond)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if d := int64(after.HeapAlloc) - int64(before.HeapAlloc); d > n*(48<<10) {
+		t.Errorf("%d stalled handshakes hold %d bytes, %d each", n, d, d/n)
+	}
+	for _, c := range conns {
+		c.Close()
+	}
+	for range n {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handshake did not end with its connection")
+		}
+	}
+}
+
+func TestReadHandshake(t *testing.T) {
+	long := "X-Long: " + strings.Repeat("a", 6000) + "\r\n"
+	in := "HTTP/1.1 101 Switching Protocols\r\n" + long + "upgrade: WebSocket\r\nSec-WebSocket-Accept:  abc= \r\n\r\nrest"
+	br := bufio.NewReaderSize(strings.NewReader(in), 4096)
+	status, upgrade, accept, err := readHandshake(br)
+	if err != nil || status != 101 || upgrade != "WebSocket" || accept != "abc=" {
+		t.Fatalf("%d %q %q %v", status, upgrade, accept, err)
+	}
+	if rest, _ := br.Peek(4); string(rest) != "rest" {
+		t.Fatalf("bytes after the head: %q", rest)
+	}
+	for _, bad := range []string{"", "HTTP/1.1\r\n\r\n", "SSH-2.0 101 x\r\n\r\n", "HTTP/1.1 1o1 x\r\n\r\n", "HTTP/1.1 101 x\r\nnocolon\r\n\r\n", "HTTP/1.1 101 x\r\nUpgrade: websocket\r\n"} {
+		if _, _, _, err := readHandshake(bufio.NewReader(strings.NewReader(bad))); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
 	}
 }

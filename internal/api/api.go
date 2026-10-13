@@ -81,7 +81,14 @@ type Options struct {
 	CheckClient func(c config.Client) error
 }
 
-const maxBody = 4 << 20
+// maxBody bounds the body of a link import, the only request that carries
+// bulk text. Everything else is a small JSON object and gets maxJSONBody:
+// a few megabytes of "[{},{},...]" decode into over a million rules before
+// any count check.
+const (
+	maxBody     = 4 << 20
+	maxJSONBody = 256 << 10
+)
 
 type server struct {
 	store *config.Store
@@ -93,6 +100,9 @@ type server struct {
 	auth  *auth
 	hosts map[string]bool
 	mux   *http.ServeMux
+	// subMu lets one subscription be fetched and parsed at a time: each
+	// can hold several megabytes, and the UI can refresh them all at once.
+	subMu sync.Mutex
 }
 
 // New builds the handler. It fails if AdminPassword is empty.
@@ -203,7 +213,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		limit := int64(maxJSONBody)
+		if r.URL.Path == "/api/import" {
+			limit = maxBody
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 	}
 	s.mux.ServeHTTP(w, r)
 }
@@ -293,7 +307,7 @@ func decode(r *http.Request, v any) error {
 	return nil
 }
 
-// defaultFetch downloads a subscription: 30s timeout, 4 MB cap, at most
+// defaultFetch downloads a subscription: 30s timeout, 2 MB cap, at most
 // maxRedirects redirects. The URL itself may point anywhere, including the
 // LAN (an admin may host a subscription there). A redirect to another host
 // may not reach a loopback, link-local, private, CGNAT or unspecified
@@ -318,13 +332,14 @@ func defaultFetch(ctx context.Context, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server answered HTTP %d", resp.StatusCode) // not resp.Status: its text is the server's
 	}
-	const limit = 4 << 20
+	// MaxLinks links of a usual size are a few hundred KB, base64 included.
+	const limit = 2 << 20
 	b, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(b) > limit {
-		return nil, errors.New("subscription is larger than 4 MB")
+		return nil, errors.New("subscription is larger than 2 MB")
 	}
 	return b, nil
 }

@@ -308,7 +308,22 @@ func setCookie(w http.ResponseWriter, r *http.Request, value string, maxAge int)
 	})
 }
 
+// loginReadTimeout is how long the login body may take to arrive. A
+// variable for tests.
+var loginReadTimeout = 5 * time.Second
+
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	// Before login a request must not be able to wait: one that announced
+	// a body and never sent it sat until the server's read timeout with
+	// its parsed headers in memory (round 17).
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(loginReadTimeout))
+	if r.ContentLength < 0 || r.ContentLength > maxLoginBody {
+		// Close: net/http would otherwise read the unread body before
+		// it sends the reply.
+		w.Header().Set("Connection", "close")
+		writeErr(w, http.StatusBadRequest, "invalid login request")
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBody)
 	var body struct {
 		Password string `json:"password"`

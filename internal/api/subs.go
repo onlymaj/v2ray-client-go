@@ -122,6 +122,7 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	if sub == nil {
 		return config.Subscription{}, errf(http.StatusNotFound, "subscription not found")
 	}
+	s.subMu.Lock()
 	body, ferr := s.fetch(r.Context(), sub.URL)
 	var res share.Result
 	if ferr == nil {
@@ -130,6 +131,8 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 			ferr = fmt.Errorf("no supported links (%d errors, %d skipped)", len(res.Errors), res.Skipped)
 		}
 	}
+	body = nil // not kept through the config save below
+	s.subMu.Unlock()
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	var out config.Subscription

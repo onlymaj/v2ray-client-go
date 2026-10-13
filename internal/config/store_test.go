@@ -138,3 +138,19 @@ func TestStoreDoesNotEscapeHTML(t *testing.T) {
 		t.Fatalf("clone: %v %+v", err, got)
 	}
 }
+
+// Round 17: a group listing a member twice was saved, could not be built,
+// and every rule using it followed the kill switch.
+func TestDuplicateGroupMemberRefused(t *testing.T) {
+	c := Default()
+	c.Clients = []Client{{ID: "c1", Name: "n", Protocol: "vless", Address: "h.example", Port: 443,
+		UUID: "11111111-2222-3333-4444-555555555555", Network: "tcp", TLS: "none"}}
+	c.Groups[0].Members = []string{"c1"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid config refused: %v", err)
+	}
+	c.Groups[0].Members = []string{"c1", "c1"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "twice") {
+		t.Fatalf("duplicate member: %v", err)
+	}
+}

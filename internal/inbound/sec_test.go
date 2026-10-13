@@ -1,6 +1,7 @@
 package inbound
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -333,5 +335,54 @@ func TestHTTPConnectLongHostRefused(t *testing.T) {
 	n, _ := c.Read(buf)
 	if !strings.HasPrefix(string(buf[:n]), "HTTP/1.1 400") {
 		t.Fatalf("300-byte CONNECT host answered %q, want 400", buf[:n])
+	}
+}
+
+// Round 17: the CONNECT request was parsed into a header map, about 15
+// times its wire size, held while the head was incomplete: 128 KiB per
+// connection for 8 KiB of small headers. The headers are skipped now.
+func TestStalledConnectHeadHoldsLittle(t *testing.T) {
+	var head strings.Builder
+	head.WriteString("CONNECT example.com:443 HTTP/1.1\r\n")
+	for i := 0; head.Len() < maxHeader-64; i++ {
+		fmt.Fprintf(&head, "%x:\r\n", i)
+	}
+	const n = 16
+	sent := make(chan struct{}, n)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range n {
+		a, b := net.Pipe()
+		defer a.Close()
+		defer b.Close()
+		go httpConnect(a)
+		go func() { b.Write([]byte(head.String())); sent <- struct{}{} }()
+	}
+	for range n {
+		<-sent
+	}
+	time.Sleep(50 * time.Millisecond)
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	if d := int64(after.HeapAlloc) - int64(before.HeapAlloc); d > n*(24<<10) {
+		t.Errorf("%d stalled CONNECT heads hold %d bytes, %d each", n, d, d/n)
+	}
+}
+
+func TestReadRequestHead(t *testing.T) {
+	in := "CONNECT h.example:443 HTTP/1.1\r\nX-Long: " + strings.Repeat("a", 6000) + "\r\nHost: other:1\r\n\r\nrest"
+	br := bufio.NewReaderSize(strings.NewReader(in), 4096)
+	method, target, err := readRequestHead(br)
+	if err != nil || method != "CONNECT" || target != "h.example:443" {
+		t.Fatalf("%q %q %v", method, target, err)
+	}
+	if rest, _ := br.Peek(4); string(rest) != "rest" {
+		t.Fatalf("bytes after the head: %q", rest)
+	}
+	for _, bad := range []string{"", "CONNECT h:1\r\n\r\n", "CONNECT h:1 SPDY/3\r\n\r\n", "CONNECT h:1 HTTP/1.1\r\nHost: h\r\n"} {
+		if _, _, err := readRequestHead(bufio.NewReader(strings.NewReader(bad))); err == nil {
+			t.Errorf("%q: accepted", bad)
+		}
 	}
 }

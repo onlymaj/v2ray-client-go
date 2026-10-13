@@ -674,9 +674,21 @@ func readMsg(r io.Reader, limit int) ([]byte, error) {
 	if n > limit {
 		return nil, errors.New("message too long")
 	}
-	msg := make([]byte, n)
-	if _, err := io.ReadFull(r, msg); err != nil {
-		return nil, err
+	// In steps, as the bytes arrive: an upstream reached through a hostile
+	// proxy server must not make every waiting query hold 64 KiB for the
+	// two bytes of a length.
+	msg := make([]byte, 0, min(n, 2048))
+	for len(msg) < n {
+		if len(msg) == cap(msg) {
+			nm := make([]byte, len(msg), min(n, 2*cap(msg)))
+			copy(nm, msg)
+			msg = nm
+		}
+		k, err := io.ReadFull(r, msg[len(msg):cap(msg)])
+		msg = msg[:len(msg)+k]
+		if err != nil {
+			return nil, err
+		}
 	}
 	return msg, nil
 }

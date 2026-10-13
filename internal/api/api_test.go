@@ -88,6 +88,9 @@ func newEnv(t *testing.T) *env {
 			if !ok {
 				return nil, errors.New("404")
 			}
+			if msg, isErr := strings.CutPrefix(b, "ERR:"); isErr {
+				return nil, errors.New(msg)
+			}
 			return []byte(b), nil
 		},
 	})

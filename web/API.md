@@ -64,7 +64,7 @@ The mock accepts the password `admin`.
 }
 ```
 
-`name` is at most 256 bytes (other text fields 1024). `status.lastError` is cut to about 300 bytes.
+`name` is at most 256 bytes (other text fields 1024); an imported link without a name gets its address as the name. `status.lastError` is cut to about 300 bytes. Request bodies are limited to 256 KiB, except `POST /api/import` (4 MB). A group may not list a member twice.
 
 | Method | Path | Body | Response |
 |---|---|---|---|
@@ -121,7 +121,7 @@ Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", 
 
 `{"id", "type", "values": ["..."], "target": {"kind", "id"}}`
 
-- `type`: `source` (client IPs or CIDRs; DNS queries match by the address they arrive from, which is the router's when the router forwards DNS to the container, see `docs/routeros.md` section 8), `domain` (sniffed domain. A value matches that name and its subdomains: `ir` matches `x.ir`; `*.example.com` matches the subdomains only), `dest` (destination IP or CIDR), or `default` (matches everything, `values` is `[]`). A `dest` rule sees only the IP address the device connected to. A proxied connection that carries a host name (sniffed from TLS or HTTP, or given to SOCKS5 or HTTP CONNECT) is sent to the proxy server by name, and the server resolves it, so a `dest` rule cannot block or redirect an address reached that way. Use a `domain` rule for names. Connections that go `direct` are checked against `dest` rules after the name is resolved.
+- `type`: `source` (client IPs or CIDRs; DNS queries match by the address they arrive from, which is the router's when the router forwards DNS to the container, see `docs/routeros.md` section 8), `domain` (sniffed domain. A value matches that name and its subdomains: `ir` matches `x.ir`; `*.example.com` matches the subdomains only. A value must be a plain host name: `.example.com`, a list in one value, a URL or a non-ASCII name is refused), `dest` (destination IP or CIDR), or `default` (matches everything, `values` is `[]`). A `dest` rule sees only the IP address the device connected to. A proxied connection that carries a host name (sniffed from TLS or HTTP, or given to SOCKS5 or HTTP CONNECT) is sent to the proxy server by name, and the server resolves it, so a `dest` rule cannot block or redirect an address reached that way. Use a `domain` rule for names. Connections that go `direct` are checked against `dest` rules after the name is resolved.
 - `target.kind`: `client` or `group` (`id` must exist), or `direct` or `block` (`id` is `""`).
 - The server evaluates the rules top to bottom, and the first match decides. The `default` rule matches everything, so rules placed after it never match. When no rule matches, the server applies `settings.killSwitch`.
 
@@ -189,7 +189,7 @@ The arrays are oldest first and all have the same length. `delay` is the health-
 |---|---|---|
 | `traffic` | `{"t": 1791417572, "total": {"upRate", "downRate"}, "clients": {"<id>": {"upRate", "downRate", "conns"}}}` | every 1 s |
 | `ping` | `{"id", "tcpMs", "delayMs", "state"}` | after each health check |
-| `status` | `{"id", "state", "lastError"}` | when a client's state changes (including enable/disable) |
+| `status` | `{"id", "state", "lastError"}` | when a health check changes a client's state (not sent on enable/disable) |
 | `group` | `{"id", "current"}` | when a group's current member changes |
 
 The server should send `retry: 3000` first and a comment line (`: ping`) every ~15 s to keep proxies from closing the stream.

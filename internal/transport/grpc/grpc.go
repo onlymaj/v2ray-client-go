@@ -97,10 +97,12 @@ type Client struct {
 	ua        string
 	t         *http2.Transport
 
-	mu     sync.Mutex
-	cc     *http2.ClientConn
-	raw    net.Conn // underlying conn of cc, for addresses
-	closed bool
+	mu      sync.Mutex
+	cc      *http2.ClientConn
+	raw     net.Conn // underlying conn of cc, for addresses
+	closed  bool
+	streams int         // tunnels open on cc
+	idle    *time.Timer // closes cc; running while streams is 0
 }
 
 var _ StreamDialer = (*Client)(nil)
@@ -135,16 +137,7 @@ func New(settings []byte) (transport.Layer, error) {
 	// the reader is slow: a LAN device that stops reading its downloads
 	// would pin 4 MiB per connection. ConfigureTransports is the only way to
 	// set the window; the http.Transport itself is never used.
-	//
-	// IdleConnTimeout closes the shared connection once it has had no
-	// tunnel for that long. Without it a connection lives for ever: every
-	// health-checked client of a subscription (up to 1000) kept a TLS and
-	// HTTP/2 connection and its pings after one probe, and so did a client
-	// that was disabled. DialStream dials again when it is needed.
-	t, err := http2.ConfigureTransports(&http.Transport{
-		IdleConnTimeout: time.Duration(idleTimeout.Load()),
-		HTTP2:           &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow},
-	})
+	t, err := http2.ConfigureTransports(&http.Transport{HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow}})
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
@@ -232,12 +225,16 @@ func tunMultiStreamName(s string) string {
 var writeTimeout atomic.Int64
 
 // idleTimeout is how long the shared connection is kept with no tunnel on
-// it. Atomic so tests can lower it.
+// it (see streamDone). It is the lifetime of a warm pooled connection of
+// the other transports, and shorter than the default health check interval:
+// a probe is a tunnel too, and must not keep the connection of every
+// client of a subscription open from one probe to the next. Atomic so
+// tests can lower it.
 var idleTimeout atomic.Int64
 
 func init() {
 	writeTimeout.Store(int64(30 * time.Second))
-	idleTimeout.Store(int64(90 * time.Second))
+	idleTimeout.Store(int64(30 * time.Second))
 }
 
 // guardConn sits between the HTTP/2 client and the connection to the server.
@@ -324,7 +321,7 @@ func (c *Client) Wrap(ctx context.Context, conn net.Conn) (net.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}
-	s, err := c.open(cc, conn, transport.Source(ctx))
+	s, err := c.open(cc, conn, transport.Source(ctx), nil)
 	if err != nil {
 		cc.Close()
 		return nil, err
@@ -347,8 +344,9 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		if old := c.cc; old != nil {
 			// Let its remaining streams finish, then close it.
 			go old.Shutdown(context.Background())
-			c.cc = nil
+			c.cc, c.raw = nil, nil
 		}
+		c.streams = 0
 		raw, err := dialRaw(ctx)
 		if err != nil {
 			return nil, err
@@ -364,11 +362,49 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 		}
 		c.cc, c.raw = cc, raw
 	}
-	s, err := c.open(c.cc, c.raw, transport.Source(ctx))
+	if c.idle != nil {
+		c.idle.Stop()
+		c.idle = nil
+	}
+	cc := c.cc
+	s, err := c.open(cc, c.raw, transport.Source(ctx), func() { c.streamDone(cc) })
 	if err != nil {
+		c.streamDoneLocked(cc)
 		return nil, err
 	}
+	c.streams++
 	return s, nil
+}
+
+// streamDone is called when a tunnel on cc has ended. When it was the last
+// one, cc is closed after idleTimeout unless a new tunnel comes first.
+// Without this the connection lived for ever: every health-checked client
+// of a subscription (up to 1000) kept a TLS and HTTP/2 connection, and its
+// pings, after one probe, and so did a client that was disabled. The timer
+// is ours rather than the HTTP/2 transport's IdleConnTimeout, so that it
+// cannot close a connection DialStream has just handed a tunnel, and so
+// that the closed connection is let go of here.
+func (c *Client) streamDone(cc *http2.ClientConn) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cc == cc {
+		c.streams--
+	}
+	c.streamDoneLocked(cc)
+}
+
+func (c *Client) streamDoneLocked(cc *http2.ClientConn) {
+	if c.cc != cc || c.streams > 0 || c.idle != nil {
+		return
+	}
+	c.idle = time.AfterFunc(time.Duration(idleTimeout.Load()), func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.cc == cc && c.streams == 0 {
+			cc.Close()
+			c.cc, c.raw, c.idle = nil, nil, nil
+		}
+	})
 }
 
 // Close closes the shared HTTP/2 connection (aborting its streams) so a
@@ -379,6 +415,10 @@ func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	if c.idle != nil {
+		c.idle.Stop()
+		c.idle = nil
+	}
 	if c.cc == nil {
 		return nil
 	}
@@ -390,7 +430,7 @@ func (c *Client) Close() error {
 // open starts the streaming call. RoundTrip runs in the background because
 // the server may send response headers only after the client's first
 // message (grpc-go sends headers lazily).
-func (c *Client) open(cc *http2.ClientConn, raw net.Conn, src string) (*streamConn, error) {
+func (c *Client) open(cc *http2.ClientConn, raw net.Conn, src string, ended func()) (*streamConn, error) {
 	authority := c.authority
 	if authority == "" {
 		authority = raw.RemoteAddr().String()
@@ -415,19 +455,26 @@ func (c *Client) open(cc *http2.ClientConn, raw net.Conn, src string) (*streamCo
 		rdl: newDeadline(), wdl: newDeadline(),
 	}
 	go s.writeLoop(pw)
-	go s.readLoop(cc, req, pr)
+	go s.readLoop(cc, req, pr, ended)
 	return s, nil
 }
 
 // readLoop performs the call and feeds decoded messages to Read. Reading
 // here rather than in Read lets a read deadline interrupt Read without
 // breaking the stream.
-func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.PipeReader) {
+// ended, if not nil, is called when the call is over.
+func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.PipeReader, ended func()) {
+	if ended != nil {
+		defer ended()
+	}
 	defer close(s.rch)
 	resp, err := cc.RoundTrip(req)
 	if err == nil {
 		defer resp.Body.Close()
 		err = checkResponse(resp)
+		// Not needed again, and kept for the life of the tunnel otherwise:
+		// a server can send hundreds of empty headers under the size limit.
+		resp.Header = nil
 	}
 	if err != nil {
 		pr.CloseWithError(err) // fail pending Writes

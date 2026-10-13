@@ -97,6 +97,21 @@ func TestNameLengthLimit(t *testing.T) {
 	}
 }
 
+// Round 17: parameters the query parser could not read (a ';', a bad
+// escape) were dropped without a word, and with them security=tls or a
+// setting that must be refused.
+func TestVLESSUnparsableParametersRefused(t *testing.T) {
+	base := "vless://" + secUUID + "@h.example.com:443?type=tcp&"
+	for _, q := range []string{"security=tls;x=1", "security=tls%zz", "ech=AAAA;b", "pcs=ab%zz", "sni=a.example%zz"} {
+		if c, err := Parse(base + q + "#n"); err == nil {
+			t.Errorf("%s: accepted as tls=%q sni=%q", q, c.TLS, c.SNI)
+		}
+	}
+	if _, err := Parse(base + "security=tls&sni=a.example#n"); err != nil {
+		t.Errorf("valid link refused: %v", err)
+	}
+}
+
 // Round 9: ParseBulk split the whole body into lines before counting
 // links, so a 4 MB body of newlines (a few KB gzipped from a subscription
 // server) allocated about 76 MB against a 32 MB memory limit.
