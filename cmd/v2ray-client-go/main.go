@@ -127,11 +127,10 @@ func run() error {
 
 	// apply pushes a config snapshot into every component. It runs once at
 	// startup and after every successful Store.Update.
-	// Store.Update calls subscribers after releasing its lock, so two
-	// overlapping saves can deliver snapshots out of order. Serialize applies
-	// and always apply the store's latest snapshot, so a stale one arriving
-	// last can't leave the running state behind what the UI shows (e.g. the
-	// kill switch still "direct" after it was set to "block").
+	// The store notifies one update at a time with its latest snapshot,
+	// so applyMu and the re-read below are a second guard: the running
+	// state must never be behind what the UI shows (e.g. the kill switch
+	// still "direct" after it was set to "block").
 	var applyMu sync.Mutex
 	var rosWarned string
 	apply := func(*config.Config) {
@@ -164,14 +163,17 @@ func run() error {
 		dnsSrv.Flush()
 		r := c.Settings.RouterOS
 		rosURL, rosEnabled := envOr("ROS_URL", r.URL), r.Enabled || os.Getenv("ROS_URL") != ""
+		envMsg := "" // logged once, and only when the sync is wanted (round 26)
 		if os.Getenv("ROS_PASS") != "" && os.Getenv("ROS_URL") == "" {
 			// Never send an env-supplied password to a URL set through the UI.
+			if rosEnabled {
+				envMsg = "ROS_PASS is set but ROS_URL is not"
+			}
 			rosEnabled = false
-			log.Print("routeros: ROS_PASS is set but ROS_URL is not; sync disabled")
 		}
 		// The same checks the settings get, on what is used: ROS_URL is
 		// not in the settings (round 19).
-		msg := ""
+		msg := envMsg
 		if rosEnabled {
 			msg = rosProblem(rosURL, r.AddressList, r.CertSHA256, envOr("ROS_PASS", r.Password))
 		}
@@ -261,8 +263,9 @@ func run() error {
 		go func() { errc <- dnsSrv.ListenAndServe(ctx, ":"+strconv.Itoa(int(p.DNS))) }()
 	}
 
-	// ReadTimeout bounds slow-body uploads; the SSE handler clears its own
-	// deadlines.
+	// ReadTimeout bounds slow-body uploads. It does not end a handler that
+	// is running, so the event stream lives on; that handler sets its own
+	// write deadlines.
 	hs := &http.Server{
 		Handler:           ui,
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,

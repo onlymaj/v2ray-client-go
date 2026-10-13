@@ -514,10 +514,6 @@ func ParseBulk(text string) Result {
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
-		if links++; links > MaxLinks {
-			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: fmt.Sprintf("too many links (max %d)", MaxLinks)})
-			break
-		}
 		// A copy of the line: the client's fields are cut from it, and cut
 		// from text they kept the whole subscription body alive, 2 MiB for
 		// every refresh that brought a new server (round 21).
@@ -525,11 +521,20 @@ func ParseBulk(text string) Result {
 			line = strings.Clone(line)
 		}
 		c, err := Parse(line)
+		if errors.Is(err, ErrUnsupportedScheme) || !strings.Contains(line, "://") {
+			// Not counted as a link: a list of 990 ss:// lines and 20
+			// usable ones was refused whole (round 26). The size of the
+			// text bounds this loop.
+			r.Skipped++
+			continue
+		}
+		if links++; links > MaxLinks {
+			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: fmt.Sprintf("too many links (max %d)", MaxLinks)})
+			break
+		}
 		switch {
 		case err == nil:
 			r.Clients = append(r.Clients, c)
-		case errors.Is(err, ErrUnsupportedScheme) || !strings.Contains(line, "://"):
-			r.Skipped++
 		default:
 			r.Errors = append(r.Errors, LineError{Line: i + 1, Text: clip(line), Err: clip(err.Error())})
 		}

@@ -158,3 +158,14 @@ func TestVLESSUnsupportedTLSSettingsRefused(t *testing.T) {
 		}
 	}
 }
+
+// Round 26: lines of other schemes counted towards the link limit, so a
+// list of many ss:// lines and a few usable links was refused whole.
+func TestSkippedLinesDoNotCountAsLinks(t *testing.T) {
+	text := strings.Repeat("ss://YWVzLTI1Ni1nY206cGFzcw@h.example:8388#x\n", MaxLinks+10) +
+		"vless://b831381d-6324-4d53-ad4f-8cda48b30811@pinned.example:443?security=tls#x\n"
+	r := ParseBulk(text)
+	if len(r.Clients) != 1 || len(r.Errors) != 0 || r.Skipped != MaxLinks+10 {
+		t.Fatalf("%d clients, %d errors, %d skipped", len(r.Clients), len(r.Errors), r.Skipped)
+	}
+}

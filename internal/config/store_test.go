@@ -333,3 +333,50 @@ func TestUpdateReleasesTheLockOnPanic(t *testing.T) {
 		t.Fatal("Get blocks after a panic in Update's callback")
 	}
 }
+
+// Round 26: every Update wrote the file and notified, also when nothing
+// had changed: an import of known links or the settings form sent as it
+// was rewrote the config and made every component reload.
+func TestUnchangedUpdateWritesNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notified := 0
+	s.OnChange(func(*Config) { notified++ })
+	if err := s.Update(func(c *Config) error { c.Settings.HealthInterval = 30; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur := s.Get()
+	time.Sleep(20 * time.Millisecond)
+	if err := s.Update(func(c *Config) error { c.Settings.HealthInterval = 30; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(path)
+	if notified != 1 || !after.ModTime().Equal(before.ModTime()) || s.Get() != cur {
+		t.Fatalf("%d notifications, file rewritten %v, snapshot replaced %v", notified, !after.ModTime().Equal(before.ModTime()), s.Get() != cur)
+	}
+}
+
+// Round 26: one message for three limits, and a pin written with spaces
+// was refused although the sync reads it that way.
+func TestListLimitsAndSpacedPin(t *testing.T) {
+	c := Default()
+	for range MaxSubscriptions + 1 {
+		c.Subscriptions = append(c.Subscriptions, Subscription{ID: NewID(), URL: "https://sub.example/"})
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "too many subscriptions (101, limit 100)") {
+		t.Fatalf("101 subscriptions: %v", err)
+	}
+	c = Default()
+	c.Settings.RouterOS.URL = "https://172.17.0.1"
+	c.Settings.RouterOS.CertSHA256 = strings.Repeat("AB CD:", 16)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("pin with spaces and colons: %v", err)
+	}
+}

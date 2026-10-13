@@ -130,7 +130,7 @@ func matchKey(c config.Client) string {
 // refresh downloads the subscription and replaces its clients. Clients that
 // match an old one on matchKey keep its ID and enabled flag, so groups and
 // rules keep pointing at them; vanished ones are removed with their
-// references; new ones are enabled and appended to the "default" group.
+// references, except those a rule targets, which are kept; new ones are enabled and appended to the "default" group.
 // A failed download, or one with no usable links, only records lastError.
 func (s *server) refresh(r *http.Request, id string) (config.Subscription, error) {
 	sub := findSub(s.store.Get(), id)
@@ -177,6 +177,10 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		sp.Note = ""
 		if ferr != nil {
 			sp.LastError = clip(ferr.Error(), maxLastError)
+			if r.Context().Err() != nil {
+				// The browser left: not a failure of the subscription.
+				sp.LastError = "the refresh was cancelled before it finished"
+			}
 			out = *sp
 			return nil
 		}
@@ -280,7 +284,6 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	// client at once anyway, in the lane for untrusted clients. Here they
 	// would queue in the lane of the "check now" button and of the admin's
 	// own saves, 10 s each when their servers stall (round 16).
-	_ = fresh
 	return out, nil
 }
 

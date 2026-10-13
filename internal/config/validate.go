@@ -23,6 +23,13 @@ const MaxClients = 250
 // members were 36 MiB (round 21).
 const MaxMemberships = 4000
 
+// Limits on the other lists.
+const (
+	MaxGroups        = 200
+	MaxRules         = 1000
+	MaxSubscriptions = 100
+)
+
 // Validate checks references between clients, groups and rules, and that
 // the rules compile. Protocol-specific fields are checked when the client's
 // dialer is built.
@@ -30,10 +37,16 @@ func (c *Config) Validate() error {
 	if len(c.Clients) > MaxClients {
 		return fmt.Errorf("too many clients (%d, limit %d)", len(c.Clients), MaxClients)
 	}
-	if len(c.Groups) > 200 || len(c.Rules) > 1000 || len(c.Subscriptions) > 100 {
-		return errors.New("too many groups, rules or subscriptions")
+	for _, l := range []struct {
+		what   string
+		n, max int
+	}{{"groups", len(c.Groups), MaxGroups}, {"rules", len(c.Rules), MaxRules}, {"subscriptions", len(c.Subscriptions), MaxSubscriptions}} {
+		if l.n > l.max {
+			return fmt.Errorf("too many %s (%d, limit %d)", l.what, l.n, l.max)
+		}
 	}
-	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(strings.ReplaceAll(h, ":", "")) {
+	// Colons and spaces, as the pin itself is read (routeros.pinVerifier).
+	if h := c.Settings.RouterOS.CertSHA256; h != "" && !isHex64(strings.NewReplacer(":", "", " ", "").Replace(strings.TrimSpace(h))) {
 		return errors.New("routeros certSha256 must be 64 hex characters")
 	}
 	members := 0
@@ -106,9 +119,6 @@ func (c *Config) Validate() error {
 	return c.Settings.validate()
 }
 
-// validate refuses settings the listeners, the health checker or the DNS
-// forwarder could not use. A clash between ports would stop the next start
-// with the UI unreachable, so it must never be saved.
 // repair replaces settings that validate refuses with their defaults and
 // returns what it changed. Open uses it: a config file written before these
 // checks existed must not stop the start, which would leave the UI
@@ -151,6 +161,9 @@ func (s *Settings) repair() []string {
 	return fixed
 }
 
+// validate refuses settings the listeners, the health checker or the DNS
+// forwarder could not use. A clash between ports would stop the next start
+// with the UI unreachable, so it must never be saved.
 func (s *Settings) validate() error {
 	if s.HealthInterval < 5 || s.HealthInterval > 3600 {
 		return errors.New("healthInterval must be 5-3600 seconds")

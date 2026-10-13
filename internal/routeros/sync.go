@@ -177,12 +177,15 @@ func (s *Syncer) Run(ctx context.Context) {
 			if gen != seenGen || !now.Before(nextResolve) {
 				seenGen = gen
 				desired, hold, resolveErr = s.resolveAll(ctx, hosts, resolved)
+				// From the end of the pass: with names that do not
+				// resolve a pass takes minutes, and counted from its
+				// start the first back-offs were over before it was.
 				if resolveErr != nil {
 					resolveFails++
-					nextResolve = now.Add(s.backoff(resolveFails))
+					nextResolve = time.Now().Add(s.backoff(resolveFails))
 				} else {
 					resolveFails = 0
-					nextResolve = now.Add(s.opts.ResolveInterval)
+					nextResolve = time.Now().Add(s.opts.ResolveInterval)
 				}
 			}
 

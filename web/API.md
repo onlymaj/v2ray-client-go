@@ -8,7 +8,7 @@ The web UI (`web/`) uses this contract. The Vite mock (`web/mock/`) implements i
 - Every endpoint except `POST /api/login` and `POST /api/logout` requires the session cookie. Without it, the response is `401`.
 - Every `POST`, `PUT` and `DELETE` must send `Content-Type: application/json`, including requests with no body (logout, toggle, check, refresh, deletes). Without the header, the response is `415`. This is the CSRF guard: a cross-site form cannot set this header.
 - The server may omit fields whose value is empty (`omitempty`). Clients must treat a missing field as its zero value.
-- Errors have a non-2xx status with the body `{"error": "human readable message"}`. The UI shows `error` to the user. Status codes in use: `400` validation, `401` no or bad session, `404` unknown id, `405` wrong method, `403` request for another host name or from another origin, `413` body too large, `415` missing JSON content type, `429` too many login attempts, `409` conflict (for example, deleting a group that a rule uses).
+- Errors have a non-2xx status with the body `{"error": "human readable message"}`. The UI shows `error` to the user. Status codes in use: `400` validation, `401` no or bad session, `404` unknown id or a wrong method on a known path, `403` request for another host name or from another origin, `413` body too large, `415` missing JSON content type, `429` too many login attempts, `409` conflict (for example, deleting a group that a rule uses).
 - A successful request with no body returns `204`.
 - Times are RFC 3339 strings in UTC. An empty string `""` means never. Rates are bytes per second. Counters are bytes.
 - The server assigns ids (opaque strings). The server ignores ids in POST bodies.
@@ -85,12 +85,12 @@ The server validates these fields: `name` and `address` must not be empty. `port
 
 ## Import and subscriptions
 
-`POST /api/import` `{"text": "..."}` → `{"added": [Client], "errors": [{"line": 3, "text": "ss://...", "error": "unsupported scheme"}], "skipped": 1}`
+`POST /api/import` `{"text": "..."}` → `{"added": [Client], "errors": [{"line": 3, "text": "vless://...", "error": "uuid: invalid UUID"}], "skipped": 1}`
 
 - `text` contains one `vless://` or `vmess://` link per line. The server ignores blank lines and lines that start with `#`. If the whole text is base64, the server decodes it first. This is the usual subscription body format.
 - `line` is 1-based. `text` is the offending line, truncated to 256 characters. A link that parses but cannot be used (for example an unknown `fp`, a `uuid` that is not a UUID, or `headerType=http`) is reported the same way; if it was found after parsing, `line` is 0 and `text` is the client's name.
 - Imported clients are `untrusted` and have `allowInsecure` false. They are enabled and added to the group with id `default` (the first-start group, whatever it is called now), if it exists: when the default rule points at that group they can carry traffic at once. The same holds for clients a subscription refresh adds; a server whose link changes between refreshes counts as new and is added again after the admin removed it from the group.
-- `skipped` counts links that are already present (same address, port and uuid).
+- `skipped` counts lines that were left out without an error: links that are already present (same protocol, address, port and uuid), links of other schemes (`ss://`, `trojan://`, ...) and lines that are not links. Only `vless://` and `vmess://` lines count towards the limit of 1000 links.
 
 Subscription object: `{"id", "name", "url", "lastUpdate", "count", "lastError", "note"}`. `lastError` is set only when the last refresh failed and changed nothing. `note` (omitted when empty) belongs to a refresh that was applied: how many links failed to parse and how many clients were kept.
 
@@ -194,7 +194,7 @@ The arrays are oldest first and all have the same length. `delay` is the health-
 | `status` | `{"id", "state", "lastError"}` | when a health check changes a client's state (not sent on enable/disable) |
 | `group` | `{"id", "current"}` | when a group's current member changes |
 
-The server should send `retry: 3000` first and a comment line (`: ping`) every ~15 s to keep proxies from closing the stream.
+The server should send `retry: 3000` first and a comment line (`: hb`) every ~15 s to keep proxies from closing the stream.
 
 ## Static files
 
@@ -206,5 +206,7 @@ The server serves `web/dist` at `/`, with `index.html` as the fallback for `/`. 
 - `415` on POST/PUT/DELETE without `Content-Type: application/json`.
 - `429` (with `Retry-After`) from `POST /api/login`: more than one login in flight per IP, more than 5 attempts per IP per minute, or more than 30 attempts per minute across all IPs.
 - `400` from `POST /api/import` with more than 1000 links; the config holds at most 250 clients in total, and a save that would pass that is refused with `400`.
+- `400` when a save would pass 200 groups, 1000 rules or 100 subscriptions; the message names the list and the limit.
+- A save that changes nothing is answered like any other but writes nothing and sends no reload.
 - Changing `settings.routeros.url` or `user` without sending a new password clears the stored password.
 - Sessions are bound to the client IP that logged in (a request with the cookie from another IP gets `401`) and expire after 12 hours without use, or 7 days after login at the latest.

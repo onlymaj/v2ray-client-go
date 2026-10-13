@@ -110,6 +110,9 @@ func (s *Store) Get() *Config {
 // and then publishes it. If fn or validation fails nothing changes.
 func (s *Store) Update(fn func(*Config) error) error {
 	if err := s.replace(fn); err != nil {
+		if err == errUnchanged {
+			return nil
+		}
 		return err
 	}
 
@@ -134,8 +137,12 @@ func (s *Store) Update(fn func(*Config) error) error {
 func (s *Store) replace(fn func(*Config) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next, err := clone(s.cur)
+	before, err := marshal(s.cur, "")
 	if err != nil {
+		return err
+	}
+	next := &Config{}
+	if err := json.Unmarshal(before, next); err != nil {
 		return err
 	}
 	if err := fn(next); err != nil {
@@ -159,12 +166,21 @@ func (s *Store) replace(fn func(*Config) error) error {
 	if err := next.Validate(); err != nil {
 		return err
 	}
+	// Disk is written only when the config changes: a save of what is
+	// there already (an import of known links, the settings form sent
+	// unchanged) rewrote the file and made every component reload, with a
+	// DNS cache flush and a new lookup of every server name (round 26).
+	if after, err := marshal(next, ""); err == nil && bytes.Equal(after, before) {
+		return errUnchanged
+	}
 	if err := s.write(next); err != nil {
 		return err
 	}
 	s.cur = next
 	return nil
 }
+
+var errUnchanged = errors.New("config: unchanged")
 
 // OnChange registers f to be called (synchronously, after the write) with
 // every new snapshot.
