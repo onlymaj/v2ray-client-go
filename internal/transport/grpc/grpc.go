@@ -137,7 +137,12 @@ func New(settings []byte) (transport.Layer, error) {
 	// the reader is slow: a LAN device that stops reading its downloads
 	// would pin 4 MiB per connection. ConfigureTransports is the only way to
 	// set the window; the http.Transport itself is never used.
-	t, err := http2.ConfigureTransports(&http.Transport{HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow}})
+	t, err := http2.ConfigureTransports(&http.Transport{
+		HTTP2: &http.HTTP2Config{MaxReceiveBufferPerStream: streamWindow},
+		// Otherwise the transport asks for gzip and inflates a reply that
+		// claims it, which gRPC never does (round 19).
+		DisableCompression: true,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("grpc: %w", err)
 	}

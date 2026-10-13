@@ -46,6 +46,7 @@ func (f *fakeRT) CheckNow(id string) {
 type env struct {
 	t      *testing.T
 	srv    *httptest.Server
+	h      *server
 	store  *config.Store
 	bus    *events.Bus
 	cookie *http.Cookie
@@ -97,6 +98,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.h = h.(*server)
 	e.srv = httptest.NewServer(h)
 	t.Cleanup(e.srv.Close)
 	return e

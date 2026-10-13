@@ -100,9 +100,9 @@ type server struct {
 	auth  *auth
 	hosts map[string]bool
 	mux   *http.ServeMux
-	// subMu lets one subscription be fetched and parsed at a time: each
+	// subSem lets one subscription be fetched and parsed at a time: each
 	// can hold several megabytes, and the UI can refresh them all at once.
-	subMu sync.Mutex
+	subSem chan struct{}
 }
 
 // New builds the handler. It fails if AdminPassword is empty.
@@ -117,6 +117,7 @@ func New(opts Options) (http.Handler, error) {
 	s := &server{
 		store: opts.Store, bus: opts.Bus, rt: opts.Runtime, web: opts.Web,
 		fetch: opts.Fetch, check: opts.CheckClient, auth: a, hosts: map[string]bool{}, mux: http.NewServeMux(),
+		subSem: make(chan struct{}, 1),
 	}
 	for _, h := range opts.AllowedHosts {
 		if h = normHost(h); h != "" {
@@ -183,6 +184,10 @@ func (s *server) routes() {
 	})
 }
 
+// refusedReadTimeout is how long the body of a request without a session
+// may take; login sets its own.
+const refusedReadTimeout = time.Second
+
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 && !s.auth.valid(r) {
 		// Without a session nothing but the login reads a body (the UI
@@ -190,8 +195,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// net/http reads an unread one before it sends the reply: a
 		// request that announced a body and never sent it held its
 		// headers until the read timeout on every refusal (round 18).
-		// The login takes this off again once it has its body.
+		// The login takes this off again once it has its body. The read
+		// deadline is for after the reply: net/http still reads the body
+		// when it closes it, and the request stayed until then (round 19).
 		w.Header().Set("Connection", "close")
+		http.NewResponseController(w).SetReadDeadline(time.Now().Add(refusedReadTimeout))
 	}
 	if r.URL.Path != "/api" && !strings.HasPrefix(r.URL.Path, "/api/") {
 		if s.web == nil {

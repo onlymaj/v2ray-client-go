@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"github.com/onlymaj/v2ray-client-go/internal/router"
 	"os"
 	"path/filepath"
@@ -159,5 +160,32 @@ func TestDuplicateGroupMemberRefused(t *testing.T) {
 	c.Groups[0].Members = []string{"c1", "c1"}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "twice") {
 		t.Fatalf("duplicate member: %v", err)
+	}
+}
+
+// Round 19: the repair of a RouterOS block that is now refused replaced a
+// valid URL, kept the password beside the default URL, and did not say the
+// sync was off.
+func TestOpenRepairsRouterOSSettings(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ros         string
+		url, pass   string
+		wantInFixed string
+	}{
+		"no list":   {`{"enabled":true,"url":"https://192.168.88.1","password":"p","addressList":""}`, "https://192.168.88.1", "p", "sync is turned off"},
+		"no scheme": {`{"enabled":true,"url":"192.168.88.1","password":"p","addressList":"x"}`, Default().Settings.RouterOS.URL, "", "password are reset"},
+	} {
+		c := Default()
+		if err := json.Unmarshal([]byte(`{"settings":{"routeros":`+tc.ros+`}}`), c); err != nil {
+			t.Fatal(err)
+		}
+		fixed := c.Settings.repair()
+		r := c.Settings.RouterOS
+		if r.Enabled || r.URL != tc.url || r.Password != tc.pass || len(fixed) != 1 || !strings.Contains(fixed[0], tc.wantInFixed) {
+			t.Errorf("%s: %+v, fixed %q", name, r, fixed)
+		}
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s: still refused: %v", name, err)
+		}
 	}
 }

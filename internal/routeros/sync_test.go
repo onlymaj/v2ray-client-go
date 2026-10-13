@@ -556,3 +556,55 @@ func TestReconcileEndsWhenRouterStopsAnswering(t *testing.T) {
 		t.Fatalf("%d writes sent to a router that does not answer", n)
 	}
 }
+
+// Round 19: only a failed connection counted as "no answer". A router that
+// sent its reply headers and then nothing kept the pass going, one client
+// timeout per address.
+func TestReconcileEndsWhenRepliesStall(t *testing.T) {
+	var writes atomic.Int32
+	stop := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Write([]byte("[]"))
+			return
+		}
+		writes.Add(1)
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-stop
+	}))
+	defer srv.Close()
+	defer close(stop)
+	hc := srv.Client()
+	hc.Timeout = 100 * time.Millisecond
+	var desired []string
+	for i := range 50 {
+		desired = append(desired, fmt.Sprintf("203.0.113.%d", i+1))
+	}
+	s := New(Options{Logf: func(string, ...any) {}})
+	_, err := s.reconcile(context.Background(), newClient(srv.URL, "u", "p", hc), "no-proxy", desired, true)
+	if err == nil || !strings.Contains(err.Error(), "pass ended early") || writes.Load() > maxLost {
+		t.Fatalf("%d writes, err %v", writes.Load(), err)
+	}
+}
+
+// Round 19: every config save sets the server list, and that counted as a
+// settings change which ended a running pass as failed.
+func TestSavingTheConfigDoesNotEndAPass(t *testing.T) {
+	var s *Syncer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Write([]byte("[]"))
+			return
+		}
+		s.SetServers([]string{"203.0.113.1"}) // a save during the pass
+		w.Write([]byte("{}"))
+	}))
+	defer srv.Close()
+	s = New(Options{Logf: func(string, ...any) {}})
+	n, err := s.reconcile(context.Background(), newClient(srv.URL, "u", "p", srv.Client()), "no-proxy", []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}, true)
+	if err != nil || n != 3 {
+		t.Fatalf("owned %d, err %v", n, err)
+	}
+}

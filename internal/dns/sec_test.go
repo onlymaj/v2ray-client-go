@@ -670,3 +670,21 @@ func TestUpstreamAnswerSizeBounded(t *testing.T) {
 		t.Fatalf("%d-byte answer refused: %v", maxAnswer, err)
 	}
 }
+
+// Round 19: the test above passed without the fix, because it gave readMsg
+// the limit itself. This one goes through the exchange.
+func TestExchangeRefusesOversizeAnswer(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	go func() {
+		readMsg(b, 0xffff)
+		b.Write([]byte{0x50, 0x00}) // announces 20 KiB
+		b.Write(make([]byte, 0x5000))
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := exchangeOn(ctx, a, buildQuery(1, "big.example", typeA, 0)); err == nil || err.Error() != "message too long" {
+		t.Fatalf("20 KiB answer: %v", err)
+	}
+}

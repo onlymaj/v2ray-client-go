@@ -774,3 +774,48 @@ func TestIdleSharedConnIsClosed(t *testing.T) {
 		t.Fatalf("%d dials, want 2 (a new connection after the idle one closed)", n)
 	}
 }
+
+// Round 19: the HTTP/2 transport added "accept-encoding: gzip" to the
+// tunnel request and would have inflated a reply marked as gzip. A gRPC
+// client sends no such header.
+func TestTunnelRequestDoesNotAskForGzip(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan string, 1)
+	h2 := &http2.Server{}
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		h2.ServeConn(c, &http2.ServeConnOpts{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			got <- r.Header.Get("Accept-Encoding")
+			w.Header().Set("Content-Type", "application/grpc")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			io.Copy(io.Discard, r.Body)
+		})})
+	}()
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	c, err := cl.DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+		return net.Dial("tcp", ln.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte("x"))
+	select {
+	case ae := <-got:
+		if ae != "" {
+			t.Fatalf("accept-encoding %q sent", ae)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no request")
+	}
+}

@@ -85,6 +85,12 @@ func newClient(baseURL, user, pass string, hc *http.Client) *Client {
 	return &Client{base: base + "/rest", user: user, pass: pass, hc: hc}
 }
 
+// replyError is a refusal the router answered with, as opposed to no
+// answer at all.
+type replyError string
+
+func (e replyError) Error() string { return string(e) }
+
 // List returns the entries of address list name.
 func (c *Client) List(ctx context.Context, name string) ([]Entry, error) {
 	var raw json.RawMessage
@@ -169,9 +175,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if resp.StatusCode >= 300 {
 		var ae apiError
 		if json.Unmarshal(b, &ae) == nil && (ae.Message != "" || ae.Detail != "") {
-			return fmt.Errorf("routeros %s %s: %d %s: %s", method, path, resp.StatusCode, clean(ae.Message), clean(ae.Detail))
+			return replyError(fmt.Sprintf("routeros %s %s: %d %s: %s", method, path, resp.StatusCode, clean(ae.Message), clean(ae.Detail)))
 		}
-		return fmt.Errorf("routeros %s %s: %s", method, path, clean(resp.Status))
+		return replyError(fmt.Sprintf("routeros %s %s: %s", method, path, clean(resp.Status)))
 	}
 	if out == nil {
 		return nil

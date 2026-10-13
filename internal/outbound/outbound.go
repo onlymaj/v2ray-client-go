@@ -65,10 +65,12 @@ func Lookup(protocol string) (Factory, error) {
 // tcp_wmem's maximum (4 MiB by default), so a device that stopped reading a
 // download had that much queued for it in kernel memory, outside every
 // limit counted in this program (round 18). The kernel doubles what is
-// asked for. The LAN has almost no round-trip time, so this costs no speed.
+// asked for and takes no more than wmem_max (208 KiB by default). On
+// Ethernet this costs no speed; on Wi-Fi with 20 ms of round-trip time it
+// bounds one connection to roughly 80 Mbit/s.
 // The sockets to the far side are left to the kernel: a fixed buffer there
 // would bound the rate to about buffer / round-trip time.
-const LANBuf = 128 << 10
+const LANBuf = 256 << 10
 
 // LANBuffers sets the buffers of an accepted connection.
 func LANBuffers(c net.Conn) {

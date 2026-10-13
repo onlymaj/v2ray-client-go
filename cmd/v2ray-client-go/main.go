@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -132,6 +133,7 @@ func run() error {
 	// last can't leave the running state behind what the UI shows (e.g. the
 	// kill switch still "direct" after it was set to "block").
 	var applyMu sync.Mutex
+	var rosWarned string
 	apply := func(*config.Config) {
 		applyMu.Lock()
 		defer applyMu.Unlock()
@@ -166,6 +168,15 @@ func run() error {
 			// Never send an env-supplied password to a URL set through the UI.
 			rosEnabled = false
 			log.Print("routeros: ROS_PASS is set but ROS_URL is not; sync disabled")
+		}
+		// The same checks the settings get, on what is used: ROS_URL is
+		// not in the settings (round 19).
+		if msg := rosProblem(rosURL, r.AddressList, r.CertSHA256); rosEnabled && msg != "" {
+			rosEnabled = false
+			if msg != rosWarned {
+				log.Printf("routeros: %s; sync disabled", msg)
+			}
+			rosWarned = msg
 		}
 		ros.SetConfig(rosEnabled, rosURL, envOr("ROS_USER", r.User), envOr("ROS_PASS", r.Password), r.AddressList, r.CertSHA256)
 		ros.SetServers(servers)
@@ -429,4 +440,18 @@ func (c *capConn) Close() error {
 	err := c.Conn.Close()
 	c.once.Do(c.release)
 	return err
+}
+
+// rosProblem reports why the RouterOS sync cannot run with these values.
+func rosProblem(rawURL, list, pin string) string {
+	u, err := url.Parse(rawURL)
+	switch {
+	case err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Hostname() == "":
+		return "the URL must be an http or https URL"
+	case u.Scheme == "http" && pin != "":
+		return "certSha256 is set but the URL is http, where no certificate is checked and the password is sent in clear text"
+	case list == "":
+		return "the address list name is empty"
+	}
+	return ""
 }

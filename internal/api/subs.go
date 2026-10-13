@@ -107,6 +107,12 @@ func (s *server) refreshSub(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// subWait is how long a refresh waits for the ones before it. A variable
+// for tests.
+var subWait = time.Minute
+
+var errBusy = errors.New("other subscriptions are still being fetched; try again")
+
 // matchKey identifies "the same server" across subscription refreshes.
 func matchKey(c config.Client) string {
 	return strings.Join([]string{c.Protocol, c.Address, strconv.Itoa(int(c.Port)), c.UUID,
@@ -125,10 +131,17 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 	}
 	var res share.Result
 	ferr := func() error {
-		s.subMu.Lock()
-		defer s.subMu.Unlock() // deferred: a panic must not leave it held
-		if err := r.Context().Err(); err != nil {
-			return err // the browser left while this one waited its turn
+		// The wait has an end: the reply must be written within the
+		// server's write timeout, and a fetch can take 30 s (round 19).
+		wait := time.NewTimer(subWait)
+		defer wait.Stop()
+		select {
+		case s.subSem <- struct{}{}:
+			defer func() { <-s.subSem }() // deferred: a panic must not leave it held
+		case <-wait.C:
+			return errBusy
+		case <-r.Context().Done():
+			return r.Context().Err() // the browser left while this one waited its turn
 		}
 		body, err := s.fetch(r.Context(), sub.URL)
 		if err != nil {

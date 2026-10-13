@@ -40,7 +40,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 	for _, msg := range c.Settings.repair() {
-		log.Printf("config: %s; using the default instead", msg)
+		log.Printf("config: %s", msg)
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)

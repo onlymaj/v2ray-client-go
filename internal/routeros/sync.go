@@ -26,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -446,16 +445,18 @@ func (s *Syncer) reconcile(ctx context.Context, c *Client, list string, desired 
 	// each would keep it (and the old URL and password, after a settings
 	// change) going for hours (round 18). The next pass starts over.
 	s.mu.Lock()
-	gen := s.gen
+	cfg := s.cfg
 	s.mu.Unlock()
 	lost := 0
 	giveUp := func(err error) bool {
-		var ue *url.Error
-		if err != nil && errors.As(err, &ue) {
+		// Anything but a refusal: no connection, no reply, or a reply
+		// that stalls after its headers (round 19).
+		var re replyError
+		if err != nil && !errors.As(err, &re) {
 			lost++
 		}
 		s.mu.Lock()
-		changed := s.gen != gen
+		changed := s.cfg != cfg // not the server list: every save sets it
 		s.mu.Unlock()
 		return lost >= maxLost || changed || ctx.Err() != nil
 	}

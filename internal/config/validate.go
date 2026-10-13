@@ -113,12 +113,19 @@ func (s *Settings) repair() []string {
 			s.Ports = def.Ports
 		case strings.HasPrefix(msg, "dnsUpstream"):
 			s.DNSUpstream = def.DNSUpstream
+		case strings.HasPrefix(msg, "routeros url"):
+			// The password goes with the URL it was entered for.
+			s.RouterOS.Enabled, s.RouterOS.URL, s.RouterOS.Password = false, def.RouterOS.URL, ""
+			fixed = append(fixed, msg+"; the RouterOS sync is turned off and its URL and password are reset")
+			continue
 		case strings.HasPrefix(msg, "routeros"):
-			s.RouterOS.Enabled, s.RouterOS.URL = false, def.RouterOS.URL
+			s.RouterOS.Enabled = false
+			fixed = append(fixed, msg+"; the RouterOS sync is turned off")
+			continue
 		case strings.HasPrefix(msg, "healthUrl"):
 			s.HealthURL = def.HealthURL
 		}
-		fixed = append(fixed, err.Error())
+		fixed = append(fixed, err.Error()+"; using the default instead")
 	}
 	return fixed
 }

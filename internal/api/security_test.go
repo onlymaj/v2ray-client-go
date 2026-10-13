@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -703,11 +704,17 @@ func TestRefusalsDoNotWaitForBody(t *testing.T) {
 		}
 		fmt.Fprintf(c, "%sContent-Length: 30\r\n\r\n", tc.req)
 		c.SetReadDeadline(time.Now().Add(3 * time.Second))
-		line, err := bufio.NewReader(c).ReadString('\n')
-		c.Close()
+		br := bufio.NewReader(c)
+		line, err := br.ReadString('\n')
 		if err != nil || !strings.HasPrefix(line, "HTTP/1.1 "+tc.want) {
 			t.Errorf("%s: %q %v, want %s at once", name, line, err, tc.want)
 		}
+		// Round 19: and the server lets go of the connection, with the
+		// request it holds, soon after; it waited for the body here too.
+		if _, err := io.Copy(io.Discard, br); err != nil {
+			t.Errorf("%s: connection still open 3 s after the refusal: %v", name, err)
+		}
+		c.Close()
 	}
 	// A login that does send its body keeps its connection.
 	resp, _ := e.do("POST", "/api/login", map[string]string{"password": "s3cret"})
@@ -744,5 +751,30 @@ func TestImportedClientGetsAName(t *testing.T) {
 	cs := e.store.Get().Clients
 	if len(cs) != 1 || cs[0].Name != "noname.example" {
 		t.Fatalf("clients %+v", cs)
+	}
+}
+
+// Round 19: a refresh waited without limit for the ones before it, and
+// after the server's write timeout its reply could not be sent.
+func TestRefreshDoesNotWaitForEver(t *testing.T) {
+	old := subWait
+	subWait = 100 * time.Millisecond
+	defer func() { subWait = old }()
+	e := newEnv(t)
+	e.login()
+	e.setSub("http://sub.example/a", manyLinks(t, 1))
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/a"}, 201, &sub)
+	e.h.subSem <- struct{}{} // another refresh is fetching
+	e.expect("POST", "/api/subscriptions/"+sub.ID+"/refresh", nil, 200, &sub)
+	<-e.h.subSem
+	if !strings.Contains(sub.LastError, "still being fetched") {
+		t.Fatalf("sub %+v", sub)
+	}
+	id := sub.ID
+	sub = config.Subscription{}
+	e.expect("POST", "/api/subscriptions/"+id+"/refresh", nil, 200, &sub)
+	if sub.LastError != "" || sub.Count != 1 {
+		t.Fatalf("sub after the wait %+v", sub)
 	}
 }

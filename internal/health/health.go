@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -230,16 +231,32 @@ func (c *Checker) Run(ctx context.Context) {
 				continue
 			}
 			if !e.next.After(now) {
-				if queued[lane(e)] >= maxQueued {
-					continue
-				}
-				queued[lane(e)]++
-				e.running = true
 				due = append(due, id)
 			} else if d := e.next.Sub(now); d < wait {
 				wait = d
 			}
 		}
+		// Longest due first, as when they all queued for a slot: in map
+		// order a client could wait for hours behind 1000 stalling ones
+		// (round 19).
+		slices.SortFunc(due, func(a, b string) int {
+			if d := c.clients[a].next.Compare(c.clients[b].next); d != 0 {
+				return d
+			}
+			return strings.Compare(a, b)
+		})
+		n := 0
+		for _, id := range due {
+			e := c.clients[id]
+			if queued[lane(e)] >= maxQueued {
+				continue
+			}
+			queued[lane(e)]++
+			e.running = true
+			due[n] = id
+			n++
+		}
+		due = due[:n]
 		c.mu.Unlock()
 		for _, id := range due {
 			go c.run(ctx, id)

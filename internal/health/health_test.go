@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -376,5 +377,48 @@ func TestDueChecksDoNotAllGetAGoroutine(t *testing.T) {
 	}
 	if peak < maxConcurrent || peak > maxQueued+8 {
 		t.Fatalf("%d goroutines for 1000 stalling clients, want about %d", peak, maxQueued)
+	}
+}
+
+// Round 19: with the cap on started checks the next one was picked in map
+// order, so a client could wait for hours behind a subscription's stalling
+// ones. The longest due goes first.
+func TestLongestDueIsCheckedFirst(t *testing.T) {
+	stall := &fakeProber{delay: time.Hour}
+	var mu sync.Mutex
+	var order []string
+	c := New(func(id string) Prober {
+		mu.Lock()
+		order = append(order, id)
+		mu.Unlock()
+		return stall
+	}, Options{Timeout: time.Minute})
+	var ids []string
+	for i := range 200 {
+		ids = append(ids, "c"+strconv.Itoa(i))
+	}
+	c.SetClients(ids, func(string) bool { return true })
+	now := time.Now()
+	c.mu.Lock()
+	for i, id := range ids {
+		c.clients[id].next = now.Add(-time.Duration(200-i) * time.Second) // c0 is due longest
+	}
+	c.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { c.Run(ctx); close(done) }()
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	got := slices.Clone(order)
+	mu.Unlock()
+	cancel()
+	<-done
+	if len(got) != maxQueued {
+		t.Fatalf("%d checks started, want %d", len(got), maxQueued)
+	}
+	for _, id := range got {
+		if n, _ := strconv.Atoi(id[1:]); n >= maxQueued {
+			t.Fatalf("%s started before the %d longest due: %v", id, maxQueued, got)
+		}
 	}
 }

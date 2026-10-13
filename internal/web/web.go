@@ -89,7 +89,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	kept := make(http.Header, len(servedHeaders))
 	for _, k := range servedHeaders {
 		if v := r.Header[k]; len(v) > 0 {
-			kept[k] = v[:1]
+			// A copy: v shares one array with every other header's value.
+			kept[k] = []string{strings.Clone(v[0])}
 		}
 	}
 	r.Header = kept
