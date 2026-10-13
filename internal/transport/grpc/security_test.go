@@ -1114,23 +1114,83 @@ func TestLastStreamSurvivesTheNextDial(t *testing.T) {
 	}
 }
 
-// Round 23: a stream was first judged a whole slowWindow after its first
-// data, so a device that replaced its stalled streams every two seconds
-// was never counted and held a window for each: 23 MiB with 64 streams. A
-// reader that has not started is counted after an eighth of the window.
+// Round 23: a stream was first judged 2 s after its first data, so a
+// device that replaced its stalled streams every two seconds was never
+// counted and held a window for each: 23 MiB with 64 streams. Round 24: a
+// shorter first window alone was passed by a reader that took 96 KiB and
+// then stalled. Every window is short now.
 func TestStalledReaderIsCountedEarly(t *testing.T) {
-	slowLimits(t, 2*time.Second, 8)
+	slowLimits(t, time.Duration(slowWindow.Load()), 8)
 	dial := floodServer(t)
-	c := dial() // read one byte, then nothing
-	defer c.Close()
-	time.Sleep(700 * time.Millisecond)
-	if n := slowCount(); n != 1 {
-		t.Fatalf("%d streams counted as slow after 0.7 s of a 2 s window, want 1", n)
+	never := dial() // read one byte, then nothing
+	defer never.Close()
+	started := dial()
+	defer started.Close()
+	started.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.ReadFull(started, make([]byte, 96<<10)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(900 * time.Millisecond)
+	if n := slowCount(); n != 2 {
+		t.Fatalf("%d streams counted as slow 0.9 s after their readers stopped, want 2", n)
 	}
 }
 
-func TestConnWindowIsSet(t *testing.T) {
+// Round 23: without a connection window (the default is 1 GiB) every young
+// stream could hold its own window. Round 24: the first test of this only
+// compared two constants. The client announces the window in its first
+// WINDOW_UPDATE on stream 0 (RFC 9113 section 6.9).
+func TestConnWindowIsAnnounced(t *testing.T) {
 	if connWindow <= int(maxSlow.Load())*streamWindow {
 		t.Fatalf("connWindow %d must be above maxSlow windows (%d), or the slow streams that are allowed stop the others", connWindow, int(maxSlow.Load())*streamWindow)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan uint32, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(3 * time.Second))
+		preface := make([]byte, len(http2.ClientPreface))
+		if _, err := io.ReadFull(c, preface); err != nil {
+			return
+		}
+		fr := http2.NewFramer(c, c)
+		fr.WriteSettings()
+		for {
+			f, err := fr.ReadFrame()
+			if err != nil {
+				return
+			}
+			if wu, ok := f.(*http2.WindowUpdateFrame); ok && wu.StreamID == 0 {
+				got <- wu.Increment
+				return
+			}
+		}
+	}()
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	c, err := cl.DialStream(context.Background(), func(ctx context.Context) (net.Conn, error) {
+		return net.Dial("tcp", ln.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	select {
+	case inc := <-got:
+		// The window starts at 65535; the update raises it to connWindow.
+		if int(inc) != connWindow && int(inc)+65535 != connWindow {
+			t.Fatalf("connection window update of %d, want %d", inc, connWindow)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no WINDOW_UPDATE for the connection")
 	}
 }

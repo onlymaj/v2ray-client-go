@@ -464,7 +464,8 @@ func (c *Client) closeIdle(cc *http2.ClientConn) {
 // and HTTP/2 connection for every tunnel (round 21). Each replaced
 // connection carries at least one tunnel, and tunnels come from the 256
 // inbound conns, 32 more that were evicted and are still closing, 64 DNS
-// queries in flight and a few health probes, so there are never more than
+// queries in flight, 16 pooled DNS upstreams and about 12 health probes
+// (some 380), so there are never more than
 // that many, each costing about what a tunnel over WebSocket and TLS does.
 // The bound is above that sum and only catches a fault in the bookkeeping.
 // Lower bounds all hurt someone: refusing new tunnels locked out clients
@@ -698,6 +699,12 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 // devices that start downloads and then read slowly or not at all. The
 // relay's idle timer does not help: a trickle in either direction resets it.
 //
+// The window is a quarter of a second. It was 2 s, and a device that kept
+// replacing its stalled streams held a window for each during those 2 s,
+// 23 MiB with 64 streams; a shorter first window alone was passed by
+// reading normally for its length (rounds 23 and 24). Being counted costs a
+// stream nothing while fewer than maxSlow are.
+//
 // A stream is slow when, over a slowWindow, data was waiting for the reader
 // at least half the time and the reader took less than slowFloor bytes per
 // second. Windows follow one another for as long as data arrives; a reader
@@ -723,7 +730,7 @@ var (
 )
 
 func init() {
-	slowWindow.Store(int64(2 * time.Second))
+	slowWindow.Store(int64(250 * time.Millisecond))
 	maxSlow.Store(32)
 }
 
@@ -734,28 +741,15 @@ type backlog struct {
 	start  time.Time     // start of the current window; zero before the first data
 	waited time.Duration // time in the window with data waiting for the reader
 	taken  int           // bytes the reader took in the window
-	judged bool          // the first window is over
 	timer  *time.Timer
-}
-
-// window is the length of the current window. The first is an eighth of
-// the others: a stream whose reader never starts is counted after 250 ms,
-// not after 2 s in which it was replaced by the next one (round 23).
-func (b *backlog) window() time.Duration {
-	w := time.Duration(slowWindow.Load())
-	if !b.judged {
-		w /= 8
-	}
-	return w
 }
 
 // judge closes the window if it is over and starts the next one.
 func (b *backlog) judge(s *streamConn, now time.Time) {
 	elapsed := now.Sub(b.start)
-	if elapsed < b.window() {
+	if elapsed < time.Duration(slowWindow.Load()) {
 		return
 	}
-	b.judged = true
 	s.setSlow(b.waited*2 >= elapsed && int64(b.taken)*int64(time.Second) < slowFloor*int64(elapsed))
 	b.start, b.waited, b.taken = now, 0, 0
 }
@@ -784,7 +778,7 @@ func (s *streamConn) deliver(data []byte, b *backlog) error {
 	s.blocked.Store(true)
 	defer s.blocked.Store(false)
 	for {
-		left := max(b.window()-now.Sub(b.start), time.Millisecond)
+		left := max(time.Duration(slowWindow.Load())-now.Sub(b.start), time.Millisecond)
 		if b.timer == nil {
 			b.timer = time.NewTimer(left)
 		} else {

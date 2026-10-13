@@ -258,7 +258,8 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 			})
 		}
 		// A config at its size limit may have no room for the message
-		// either (round 23).
+		// either (round 23). Within some 80 bytes of the limit not even
+		// the short one fits, and the request fails with the size error.
 		if err = record(); errors.Is(err, config.ErrTooLarge) {
 			msg = "too large"
 			err = record()
