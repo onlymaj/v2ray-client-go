@@ -239,7 +239,9 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		return nil
 	})
 	var he *httpError
-	if errors.As(err, &he) && he.code == http.StatusBadRequest {
+	// A config that would pass config.MaxFileSize is refused by the store,
+	// after the callback, and is recorded the same way (round 22).
+	if errors.As(err, &he) && he.code == http.StatusBadRequest || errors.Is(err, config.ErrTooLarge) {
 		// The new clients do not fit the config (over the client limit,
 		// for one). Recorded like a failed download: before round 18 the
 		// request failed and the subscription showed nothing.

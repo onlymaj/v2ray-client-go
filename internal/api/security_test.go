@@ -150,7 +150,7 @@ func TestSubscriptionCap(t *testing.T) {
 func TestSubscriptionOverClientLimitIsRecorded(t *testing.T) {
 	e := newEnv(t)
 	e.login()
-	n := config.MaxClients*6/10 // two of these do not fit together
+	n := config.MaxClients * 6 / 10 // two of these do not fit together
 	e.expect("POST", "/api/import", map[string]string{"text": manyLinks(t, n)}, 200, nil)
 	var b strings.Builder
 	for i := range n {
@@ -164,6 +164,32 @@ func TestSubscriptionOverClientLimitIsRecorded(t *testing.T) {
 	}
 	if cfg := e.store.Get(); len(cfg.Clients) != n || len(cfg.Subscriptions) != 1 || cfg.Subscriptions[0].LastError == "" {
 		t.Fatalf("%d clients, subscriptions %+v", len(cfg.Clients), cfg.Subscriptions)
+	}
+}
+
+// Round 22: a subscription whose clients make the config pass its size
+// limit was answered 400 and showed neither an error nor a date; the size
+// is checked by the store, after the update.
+func TestSubscriptionOverConfigSizeIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	e.login()
+	var b strings.Builder
+	long := strings.Repeat("p", 1000)
+	for i := range config.MaxClients {
+		l, err := share.Client{Name: "n", Protocol: "vless", Address: fmt.Sprintf("b%d.example", i), Port: 443, ID: u1,
+			Encryption: "none", Network: "grpc", TLS: "reality", SNI: long + ".example", Fingerprint: "chrome",
+			PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", SpiderX: "/" + long,
+			ServiceName: long, Authority: long + ".example"}.Link()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(l + "\n")
+	}
+	e.setSub("http://sub.example/fat", b.String())
+	var sub config.Subscription
+	e.expect("POST", "/api/subscriptions", map[string]string{"url": "http://sub.example/fat"}, 201, &sub)
+	if sub.LastError == "" || sub.LastUpdate == "" || sub.Count != 0 || len(e.store.Get().Clients) != 0 {
+		t.Fatalf("sub %+v, %d clients", sub, len(e.store.Get().Clients))
 	}
 }
 

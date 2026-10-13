@@ -170,6 +170,8 @@ The app targets about 20 MB RSS (the UPX-unpacked text plus a heap capped by `GO
 
 The property name depends on the version. Run `/container/set ?` to check. Restart the container after you change it.
 
+To stay inside that heap the app holds at most **256 proxied connections at a time, 64 per device** (one IPv4 address, or one IPv6 /64), and **250 clients**. A device at its 64 has new connections closed until some of its old ones end (idle ones end after 5 minutes). A second router doing NAT behind this one counts as one device. These numbers are fixed in the build.
+
 ### Upgrading
 
 Stop the container, remove it (`/data` stays on the mount), upload the new tar and run `/container/add` again with the same arguments. Delete the old `v2ray/root` directory first if flash is tight.

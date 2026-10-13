@@ -184,10 +184,54 @@ func TestWarmConnsAreBoundedOverAllPools(t *testing.T) {
 	for _, p := range pools {
 		total += p.Len()
 	}
-	// A fill that was past the check when the limit was reached may add
-	// one more.
-	if total < limit || total > limit+len(pools) || int(warm.Load()) != total {
+	if total != limit || int(warm.Load()) != total {
 		t.Fatalf("%d warm conns in the pools, counter %d, limit %d", total, warm.Load(), limit)
+	}
+	for _, p := range pools {
+		p.Close()
+	}
+	if n := warm.Load(); n != 0 {
+		t.Fatalf("counter is %d after closing every pool", n)
+	}
+}
+
+// Round 22: the limit was checked before the dial and counted after it, so
+// many pools filling at once with slow dials all passed the check: 131 warm
+// conns against a limit of 32.
+func TestWarmLimitHoldsWithSlowDials(t *testing.T) {
+	const limit = 4
+	maxWarm.Store(limit)
+	defer maxWarm.Store(MaxWarm)
+	ctx := context.Background()
+	dial := func(context.Context) (net.Conn, error) {
+		time.Sleep(50 * time.Millisecond)
+		a, b := net.Pipe()
+		b.Close()
+		return a, nil
+	}
+	var pools []*Pool
+	var wg sync.WaitGroup
+	for range 20 {
+		p := New(dial)
+		pools = append(pools, p)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 2 { // the second Get makes the pool busy
+				if c, _, err := p.Get(ctx); err == nil {
+					c.Close()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	time.Sleep(300 * time.Millisecond)
+	total := 0
+	for _, p := range pools {
+		total += p.Len()
+	}
+	if total > limit || int(warm.Load()) != total {
+		t.Fatalf("%d warm conns, counter %d, limit %d", total, warm.Load(), limit)
 	}
 	for _, p := range pools {
 		p.Close()

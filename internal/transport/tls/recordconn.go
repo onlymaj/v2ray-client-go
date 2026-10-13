@@ -38,8 +38,8 @@ type RecordConn struct {
 // certificate message, whose certificates it then keeps for the life of
 // the connection (350 KiB measured), and after the handshake a 64 KiB
 // handshake message collected in a buffer of twice that, with nothing
-// delivered and no error. A proxy server could park that in every one of
-// the 512 connections.
+// delivered and no error. A proxy server could park that in every
+// connection.
 const (
 	// MaxHandshakeIn is for the whole handshake. A server's flight is 3 to
 	// 12 KiB; the largest certificate chains in use are below 30 KiB.

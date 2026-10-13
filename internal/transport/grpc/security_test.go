@@ -909,9 +909,11 @@ func TestIdleConnsAreBoundedOverAllClients(t *testing.T) {
 }
 
 // Round 21: a server that allows one stream per connection got a TLS and
-// HTTP/2 connection for every tunnel, without limit.
+// HTTP/2 connection for every tunnel, without limit. Round 22: the bound
+// refused new tunnels, which locked out a client whose server retires
+// connections with GOAWAY; the oldest replaced connection is closed instead.
 func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
-	addr, conns := h2Echo(t, 1)
+	addr, _ := h2Echo(t, 1)
 	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
 	cl := l.(*Client)
 	defer cl.Close()
@@ -922,24 +924,36 @@ func TestServerWithOneStreamPerConnIsBounded(t *testing.T) {
 			c.Close()
 		}
 	}()
-	var lastErr error
-	for i := 0; i < maxDraining+4; i++ {
+	echo := func(c net.Conn) error {
+		c.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := c.Write([]byte("x")); err != nil {
+			return err
+		}
+		_, err := io.ReadFull(c, make([]byte, 1))
+		return err
+	}
+	const extra = 3
+	for i := 0; i < maxDraining+1+extra; i++ {
 		c, err := cl.DialStream(context.Background(), dial)
 		if err != nil {
-			lastErr = err
-			break
+			t.Fatalf("tunnel %d: %v", i, err)
 		}
 		open = append(open, c)
 		// A round trip, so the server's stream limit has arrived.
-		c.SetDeadline(time.Now().Add(3 * time.Second))
-		if _, err := c.Write([]byte("x")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
-			t.Fatal(err)
+		if err := echo(c); err != nil {
+			t.Fatalf("tunnel %d: %v", i, err)
 		}
 	}
-	if lastErr == nil || len(open) != maxDraining+1 || int(conns.Load()) != maxDraining+1 {
-		t.Fatalf("%d tunnels on %d connections, err %v; want %d and a refusal", len(open), conns.Load(), lastErr, maxDraining+1)
+	cl.mu.Lock()
+	n := len(cl.draining)
+	cl.mu.Unlock()
+	if n > maxDraining {
+		t.Fatalf("%d replaced connections still open, want at most %d", n, maxDraining)
+	}
+	for i, c := range open {
+		err := echo(c)
+		if old := i < extra; old != (err != nil) {
+			t.Fatalf("tunnel %d of %d: err %v, want the oldest %d ended and the rest alive", i, len(open), err, extra)
+		}
 	}
 }

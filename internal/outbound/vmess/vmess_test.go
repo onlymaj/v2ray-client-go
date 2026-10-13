@@ -479,3 +479,26 @@ func TestOversizedResponseHeaderRefusedBeforeAllocating(t *testing.T) {
 		t.Fatalf("largest real header: len %d err %v", len(got), err)
 	}
 }
+
+// Round 22: the chunk buffer was taken from the pool before the chunk's
+// size had arrived. A relay is always in Read, so every idle connection
+// held one, up to 20 KiB.
+func TestBlockedReadHoldsNoChunkBuffer(t *testing.T) {
+	a, b := net.Pipe()
+	defer b.Close()
+	cc := &clientConn{Conn: a, br: bufio.NewReader(a), gotResp: true, dec: &chunkCodec{}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := cc.Read(make([]byte, 16))
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	// Read is blocked and only reads the field before it has the size.
+	if cc.rbuf != nil {
+		t.Errorf("a conn waiting for data holds a %d-byte chunk buffer", cap(cc.rbuf))
+	}
+	a.Close()
+	if err := <-done; err == nil {
+		t.Error("Read returned without an error after Close")
+	}
+}

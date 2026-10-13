@@ -67,7 +67,7 @@ type target struct {
 	hasDelay         bool
 	// Minutes in a row with no traffic, and with no delay sample. After a
 	// whole ring of them the ring holds nothing and is released: a
-	// subscription can make each of its 1000 clients carry traffic once.
+	// subscription can make each of its clients carry traffic once.
 	quiet, delayQuiet int
 }
 

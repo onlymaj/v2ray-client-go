@@ -102,7 +102,11 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 // dial fails.
 func (p *Pool) fill() {
 	for {
-		if warm.Load() >= maxWarm.Load() {
+		// The place is taken before the dial: pools that only looked at
+		// the counter all dialed during a burst and went far over the
+		// limit (round 22).
+		if warm.Add(1) > maxWarm.Load() {
+			warm.Add(-1)
 			p.mu.Lock()
 			p.filling = false
 			p.mu.Unlock()
@@ -113,6 +117,7 @@ func (p *Pool) fill() {
 		cancel()
 		p.mu.Lock()
 		if err != nil || p.closed {
+			warm.Add(-1)
 			p.filling = false
 			p.mu.Unlock()
 			if c != nil {
@@ -122,7 +127,6 @@ func (p *Pool) fill() {
 		}
 		now := p.now()
 		p.idle = append(p.idle, entry{c, now})
-		warm.Add(1)
 		if p.timer == nil {
 			p.timer = time.AfterFunc(p.ttl, p.sweep)
 		}

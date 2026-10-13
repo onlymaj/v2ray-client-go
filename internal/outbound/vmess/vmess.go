@@ -372,6 +372,13 @@ func (c *clientConn) Read(p []byte) (int, error) {
 	}
 	for {
 		if c.rbuf == nil {
+			// Wait for the chunk's size without the buffer: a relay is
+			// always in Read, so every idle conn held one, up to 20 KiB
+			// (round 22).
+			if _, err := c.br.Peek(2); err != nil {
+				c.rerr = err
+				return 0, err
+			}
 			c.rbuf = *rbufPool.Get().(*[]byte)
 		}
 		pt, err := c.dec.open(c.br, c.rbuf)

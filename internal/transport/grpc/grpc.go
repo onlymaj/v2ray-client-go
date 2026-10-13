@@ -99,8 +99,9 @@ type Client struct {
 
 	mu sync.Mutex
 	cc *http2.ClientConn
-	// draining counts replaced connections that still have tunnels.
-	draining int
+	// draining holds replaced connections that still have tunnels, oldest
+	// first.
+	draining []*http2.ClientConn
 	raw      net.Conn // underlying conn of cc, for addresses
 	closed   bool
 	streams  int         // tunnels open on cc
@@ -349,24 +350,28 @@ func (c *Client) DialStream(ctx context.Context, dialRaw func(ctx context.Contex
 	// claims a slot that the next RoundTrip uses.
 	if c.cc == nil || !c.cc.ReserveNewRequest() {
 		if old := c.cc; old != nil {
-			// A server that allows one stream per connection (or sends a
-			// GOAWAY per stream) would otherwise get a TLS and HTTP/2
-			// connection for every tunnel (round 21).
-			if c.streams > 0 && c.draining >= maxDraining {
-				return nil, errors.New("grpc: the server allows too few streams per connection")
+			// A server that allows one stream per connection would
+			// otherwise get a TLS and HTTP/2 connection for every tunnel
+			// (round 21). The oldest replaced connection is closed and its
+			// tunnels end; new tunnels are not refused, because a server
+			// that retires its connections with GOAWAY (nginx does after
+			// 1000 requests or an hour) fills the places in honest use and
+			// the client then failed until a tunnel ended (round 22).
+			if c.streams > 0 {
+				if len(c.draining) >= maxDraining {
+					go c.draining[0].Close()
+					c.draining = slices.Delete(c.draining, 0, 1)
+				}
+				c.draining = append(c.draining, old)
 			}
 			// Let its remaining streams finish, then close it.
-			if c.streams > 0 {
-				c.draining++
-			}
-			counted := c.streams > 0
 			go func() {
 				old.Shutdown(context.Background())
-				if counted {
-					c.mu.Lock()
-					c.draining--
-					c.mu.Unlock()
+				c.mu.Lock()
+				if i := slices.Index(c.draining, old); i >= 0 {
+					c.draining = slices.Delete(c.draining, i, i+1)
 				}
+				c.mu.Unlock()
 			}()
 			idleDrop(c, old)
 			c.cc, c.raw = nil, nil
@@ -445,8 +450,9 @@ func (c *Client) closeIdle(cc *http2.ClientConn) {
 }
 
 // maxDraining is how many replaced connections of one client may still
-// have tunnels. With the usual 100 streams per connection that is far more
-// tunnels than the inbound side accepts.
+// have tunnels; one more and the oldest is closed. With the usual 100
+// streams per connection that is far more tunnels than the inbound side
+// accepts.
 const maxDraining = 7
 
 // maxIdleConns bounds the connections without a tunnel over all clients.
@@ -598,7 +604,7 @@ func (s *streamConn) readLoop(cc *http2.ClientConn, req *http.Request, pr *io.Pi
 
 // Slow readers. HTTP/2 keeps up to streamWindow buffered for a stream whose
 // reader is behind, on top of the message in hand. The cap on open conns
-// allows 512 such streams, 128 MiB against a 32 MiB heap limit, from LAN
+// allows 256 such streams, 64 MiB against a 32 MiB heap limit, from LAN
 // devices that start downloads and then read slowly or not at all. The
 // relay's idle timer does not help: a trickle in either direction resets it.
 //
