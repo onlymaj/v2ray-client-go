@@ -245,16 +245,24 @@ func (s *server) refresh(r *http.Request, id string) (config.Subscription, error
 		// The new clients do not fit the config (over the client limit,
 		// for one). Recorded like a failed download: before round 18 the
 		// request failed and the subscription showed nothing.
-		msg := err.Error()
-		err = s.update(func(cfg *config.Config) error {
-			sp := findSub(cfg, id)
-			if sp == nil {
-				return errf(http.StatusNotFound, "subscription not found")
-			}
-			sp.LastUpdate, sp.LastError = now, clip(msg, maxLastError)
-			out = *sp
-			return nil
-		})
+		msg := clip(err.Error(), maxLastError)
+		record := func() error {
+			return s.update(func(cfg *config.Config) error {
+				sp := findSub(cfg, id)
+				if sp == nil {
+					return errf(http.StatusNotFound, "subscription not found")
+				}
+				sp.LastUpdate, sp.LastError = now, msg
+				out = *sp
+				return nil
+			})
+		}
+		// A config at its size limit may have no room for the message
+		// either (round 23).
+		if err = record(); errors.Is(err, config.ErrTooLarge) {
+			msg = "too large"
+			err = record()
+		}
 	}
 	if err != nil {
 		return config.Subscription{}, err

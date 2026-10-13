@@ -1021,6 +1021,65 @@ func TestParkedTunnelsCostTheirOwner(t *testing.T) {
 	}
 }
 
+// Round 23: with 32 replaced connections kept, a device that held nothing
+// (it opened short tunnels until the connection was retired, and closed
+// them) had the long-lived tunnels of other devices cut, one connection
+// per retirement. Replaced connections are bounded by the tunnels on them,
+// so none is closed for being one too many.
+func TestRetiringConnectionsCutsNobody(t *testing.T) {
+	addr, _ := h2Echo(t, 2)
+	l, _ := New([]byte(`{"serviceName":"svc","authority":"example.com"}`))
+	cl := l.(*Client)
+	defer cl.Close()
+	dial := func(ctx context.Context) (net.Conn, error) { return net.Dial("tcp", addr) }
+	open := func(src string) net.Conn {
+		t.Helper()
+		c, err := cl.DialStream(transport.WithSource(context.Background(), src), dial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := echoOnce(c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for range 40 {
+		held = append(held, open("victim"))
+		a := open("pusher") // the connection is full
+		b := open("pusher") // and is replaced
+		a.Close()
+		b.Close()
+		// The next round starts on a connection of its own.
+		for i := 0; ; i++ {
+			cl.mu.Lock()
+			n := cl.streams
+			cl.mu.Unlock()
+			if n == 0 {
+				break
+			}
+			if i == 300 {
+				t.Fatal("the pusher's tunnel did not end")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cl.Close() // let go of the empty connection; the replaced ones stay
+		cl.mu.Lock()
+		cl.closed = false
+		cl.mu.Unlock()
+	}
+	for i, c := range held {
+		if err := echoOnce(c); err != nil {
+			t.Fatalf("long-lived tunnel %d was cut: %v", i, err)
+		}
+	}
+}
+
 // Round 22: a tunnel that had reserved a connection's last stream could be
 // failed by the next dial, which found the connection full and shut it
 // down before the stream had started.

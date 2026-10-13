@@ -452,16 +452,21 @@ func (c *Client) closeIdle(cc *http2.ClientConn) {
 }
 
 // maxDraining bounds, over all clients, the replaced connections that still
-// have tunnels. A server that allows one stream per connection would
-// otherwise get a TLS and HTTP/2 connection for every tunnel (round 21).
-// Refusing new tunnels at the bound locked out clients whose server retires
-// connections with GOAWAY, as nginx does after 1000 requests or an hour; a
-// bound per client, closing its oldest, let one LAN device that parks a
-// tunnel on each retired connection have other devices' long-lived tunnels
-// cut (round 22). So the connection closed is one of the source that has
-// tunnels on the most replaced connections, the one with the fewest tunnels
-// of other sources, the oldest first. A variable for tests.
-var maxDraining = 32
+// have tunnels. A server that allows one stream per connection gets a TLS
+// and HTTP/2 connection for every tunnel (round 21). Each replaced
+// connection carries at least one tunnel, and the inbound side accepts 256
+// conns, so there are never more than that many, each costing about what a
+// tunnel over WebSocket and TLS does. The bound is therefore above what the
+// inbound cap allows and only catches a fault in the bookkeeping. Lower
+// bounds all hurt someone: refusing new tunnels locked out clients whose
+// server retires connections with GOAWAY, as nginx does after 1000 requests
+// or an hour; closing the oldest, or one chosen by who holds tunnels on it,
+// let a LAN device that only made connections retire (short tunnels, opened
+// and closed) have other devices' long-lived tunnels cut (rounds 22 and
+// 23). If it is ever reached, the connection closed is one of the source
+// with tunnels on the most replaced connections, the one with the fewest
+// tunnels of other sources, the oldest first. A variable for tests.
+var maxDraining = 320
 
 type drained struct {
 	cc   *http2.ClientConn
