@@ -10,9 +10,10 @@
 //
 // Idle conns are closed after MaxAge (30s, shorter than the 60s traffic
 // window): servers, middleboxes and CDNs may drop idle conns, and because
-// VLESS/VMess write their header lazily a dead conn is only noticed on
-// first use. Get reports whether a conn was reused so the caller can retry
-// once on a fresh dial (see internal/client).
+// VLESS/VMess write their header lazily a dead conn would only be noticed
+// on first use. Get looks at a conn that has waited before handing it out
+// (see alive), and reports whether a conn was reused so the caller can
+// still retry once on a fresh dial (see internal/client).
 package pool
 
 import (
@@ -75,17 +76,10 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 	for first := true; ; first = false {
 		p.mu.Lock()
 		now := p.now()
+		busy := false
 		if first {
-			busy := !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
+			busy = !p.lastGet.IsZero() && now.Sub(p.lastGet) < p.busy
 			p.lastGet = now
-			defer func() {
-				p.mu.Lock()
-				if busy && !p.closed && !p.filling && len(p.idle) < p.max {
-					p.filling = true
-					go p.fill()
-				}
-				p.mu.Unlock()
-			}()
 		}
 		before := len(p.idle)
 		var age time.Duration
@@ -99,6 +93,11 @@ func (p *Pool) Get(ctx context.Context) (c net.Conn, reused bool, err error) {
 			}
 		}
 		warm.Add(int32(len(p.idle) - before))
+		// Beside this Get's own dial or use, not after it.
+		if busy && !p.closed && !p.filling && len(p.idle) < p.max {
+			p.filling = true
+			go p.fill()
+		}
 		p.mu.Unlock()
 		if c == nil {
 			break
@@ -123,17 +122,33 @@ const probeAfter = time.Second
 // send a plaintext request a second time, so every such connection failed:
 // the first plain HTTP or SSH connection after a quiet moment (round 26).
 // A conn that has data is not what was left here and is not used either.
+//
+// A read whose deadline has passed before it starts returns the timeout
+// without looking at the socket, and a goroutine can be held up for more
+// than the millisecond (the collector, four busy cores): such a read says
+// nothing and is done again (round 27). A conn that knows better how to
+// look, one whose Read does not reach the socket yet, has its own Alive.
 func alive(c net.Conn) bool {
-	if c.SetReadDeadline(time.Now().Add(time.Millisecond)) != nil {
-		return false
+	if a, ok := c.(interface{ Alive() bool }); ok {
+		return a.Alive()
 	}
 	var b [1]byte
-	n, err := c.Read(b[:])
-	var ne net.Error
-	if n != 0 || !errors.As(err, &ne) || !ne.Timeout() {
-		return false
+	for range 3 {
+		dl := time.Now().Add(time.Millisecond)
+		if c.SetReadDeadline(dl) != nil {
+			return false
+		}
+		start := time.Now()
+		n, err := c.Read(b[:])
+		var ne net.Error
+		if n != 0 || !errors.As(err, &ne) || !ne.Timeout() {
+			return false
+		}
+		if dl.Sub(start) > 200*time.Microsecond {
+			return c.SetReadDeadline(time.Time{}) == nil
+		}
 	}
-	return c.SetReadDeadline(time.Time{}) == nil
+	return false // could not tell; a fresh dial is always right
 }
 
 // fill dials until the pool holds max conns, the client goes quiet, or a

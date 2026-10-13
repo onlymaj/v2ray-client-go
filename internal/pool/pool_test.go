@@ -281,3 +281,24 @@ func TestGetSkipsAConnTheServerClosed(t *testing.T) {
 		t.Fatalf("warm counter %d, pool holds %d", w, p.Len())
 	}
 }
+
+type aliveConn struct {
+	net.Conn
+	alive bool
+	asked int
+}
+
+func (c *aliveConn) Alive() bool  { c.asked++; return c.alive }
+func (c *aliveConn) Close() error { return nil }
+
+// Round 27: a conn whose Read does not reach the socket yet (WebSocket
+// with early data, before its handshake) always looked open to the pool.
+// It is asked instead.
+func TestAliveAsksTheConn(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		c := &aliveConn{alive: want}
+		if got := alive(c); got != want || c.asked != 1 {
+			t.Fatalf("alive %v after %d questions, want %v after 1", got, c.asked, want)
+		}
+	}
+}

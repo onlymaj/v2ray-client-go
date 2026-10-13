@@ -384,6 +384,8 @@ If you turn the sync off or change the address-list name, the app stops looking 
 /ip/firewall/address-list/remove [find list=no-proxy comment="v2ray-client-go"]
 ```
 
+After a failed sync the app tries again on its own, at most 5 minutes later. Saving the settings unchanged does not make it try sooner (a save that changes nothing does nothing); change a field, for example the list name and back, if you do not want to wait.
+
 ## 10. Kill switch
 
 What should happen to proxied traffic when no proxy works? The app and the router each handle one half of the answer.

@@ -474,6 +474,25 @@ type delayConn struct {
 	dlMu    sync.Mutex
 	rdlT    time.Time // the caller's read deadline, put back after probe
 	probing bool      // probe's deadline is on the raw conn
+	probed  time.Time // when Alive last found the conn open
+}
+
+// Alive is the pool's question before it hands the conn out: Read does not
+// reach the raw conn before the handshake, so the pool's own look said
+// "open" for every delayConn (round 27).
+func (d *delayConn) Alive() bool {
+	select {
+	case <-d.dialed:
+		return d.err == nil
+	default:
+	}
+	if d.probe() != nil {
+		return false
+	}
+	d.dlMu.Lock()
+	d.probed = time.Now()
+	d.dlMu.Unlock()
+	return true
 }
 
 func (d *delayConn) SetDeadline(t time.Time) error {
@@ -506,24 +525,36 @@ func (d *delayConn) SetReadDeadline(t time.Time) error {
 // handshake, it is an earlyDataError, and a plaintext first payload is
 // then not sent again, so every such connection failed (round 25).
 func (d *delayConn) probe() error {
-	d.dlMu.Lock()
-	d.probing = true
-	d.Conn.SetReadDeadline(time.Now().Add(time.Millisecond))
-	d.dlMu.Unlock()
 	var b [1]byte
-	n, err := d.Conn.Read(b[:])
-	d.dlMu.Lock()
-	d.probing = false
-	d.Conn.SetReadDeadline(d.rdlT)
-	d.dlMu.Unlock()
-	if n > 0 {
-		return errors.New("ws: data from the server before the handshake")
+	for range 3 {
+		d.dlMu.Lock()
+		d.probing = true
+		dl := time.Now().Add(time.Millisecond)
+		d.Conn.SetReadDeadline(dl)
+		d.dlMu.Unlock()
+		start := time.Now()
+		n, err := d.Conn.Read(b[:])
+		d.dlMu.Lock()
+		d.probing = false
+		d.Conn.SetReadDeadline(d.rdlT)
+		d.dlMu.Unlock()
+		if n > 0 {
+			return errors.New("ws: data from the server before the handshake")
+		}
+		var ne net.Error
+		if err == nil {
+			return nil
+		}
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			return fmt.Errorf("ws: pooled conn is closed: %w", err)
+		}
+		// A read that started after its deadline did not look at the
+		// socket (see pool.alive); look again.
+		if dl.Sub(start) > 200*time.Microsecond {
+			return nil
+		}
 	}
-	var ne net.Error
-	if err == nil || errors.As(err, &ne) && ne.Timeout() {
-		return nil
-	}
-	return fmt.Errorf("ws: pooled conn is closed: %w", err)
+	return errors.New("ws: could not tell whether the pooled conn is open")
 }
 
 func (d *delayConn) Write(p []byte) (int, error) {
@@ -542,7 +573,10 @@ func (d *delayConn) Write(p []byte) (int, error) {
 		defer stop()
 		// Only a conn that has waited: a fresh one cannot have been
 		// closed for being idle.
-		if time.Since(d.born) > probeAfter {
+		d.dlMu.Lock()
+		checked := d.probed
+		d.dlMu.Unlock()
+		if time.Since(d.born) > probeAfter && time.Since(checked) > probeAfter {
 			if d.err = d.probe(); d.err != nil {
 				close(d.dialed)
 				return
